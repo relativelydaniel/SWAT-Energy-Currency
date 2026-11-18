@@ -51,6 +51,34 @@ def test_column_standardisation(mock_env_variables):
     assert list(cleaner.df.columns) == expected_cols
 
 
+def test_comtrade_fetch_uses_china_as_partner(mock_env_variables, monkeypatch):
+    cleaner = DataCleaner(
+        db_path=mock_env_variables["db_path"],
+        api_url=mock_env_variables["api_url"],
+        api_key=mock_env_variables["api_key"],
+    )
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {
+        "dataset": [{"refYear": 2022, "primaryValue": 10.0}]
+    }
+    request = Mock(return_value=response)
+    monkeypatch.setattr("datacleanse.requests.get", request)
+    monkeypatch.setattr("datacleanse.time.sleep", lambda _: None)
+
+    cleaner.fetch_api({288: "GHA", 566: "NGA"})
+
+    assert request.call_count == 2
+    assert {
+        call.kwargs["params"]["reporterCode"]
+        for call in request.call_args_list
+    } == {"288", "566"}
+    assert all(
+        call.kwargs["params"]["partnerCode"] == "156"
+        for call in request.call_args_list
+    )
+
+
 def test_nans(mock_env_variables, sample_uncom_df):
     # Ensures numeric NaNs turn to zero and specified columns are safely dropped.
     cleaner = DataCleaner(db_path=mock_env_variables["db_path"])

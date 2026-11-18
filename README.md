@@ -2,38 +2,16 @@
 
 DS / ML project. Emphasis on API maintenance and ETL, Exploratory Data Analysis and and Machine Learning Prediction.
 
-QUESTION: To what extent does trilateral energy equity (Electricity and Solar Energy) forecast currency stability by 2030?
+QUESTION: “To what extent could asymmetrical Solar and Electrical energy weighting help model West African currency stability by a 2030 based scenario?”
 
 Dataset: API driven UNComtrade data, DBNomics
 
 Tech Stack: Python, SQL, NashPy, SKlearn, Stats Model (data cleaning, intro / intermediate statistics + game theory, ML models)
 
-Contains an ETL pushing API information into a PGSQL database, then performs statistical calculations. Tried Symbolic regression to find the formula. Ended up doing a PCA driven approach.
+The Digital Silk Road adding cultural context, I wanted to explore the logistical implications between China, Nigeria and Ghana properly after my previous question was too niche and was microeconomic.
 
-PCA continued, then Linear Regression with a prediction
+Finished: ETL and API Automation, Descriptive Stats, Basic Log Regression
 
-Aim:
+I’m currently in the process of parametrising ML models (Linear Regression, PCA based weighting, Payoff Matrix, etc.)
 
-UNCOMTRADE
-     ↓
-DBnomics / WBG
-     ↓
-Python ETL
-     ↓
-PostgreSQL
-     ↓
-Analytical Engine
-     ↓
- ┌───┴────────┐
- ↓            ↓
-Statistics   ML
- ↓            ↓
- └────┬───────┘
-      ↓
-Scenario / Game Theory
-      ↓
-Plotly / Streamlit
-      ↓
-Cloudflare Website
-
-Future culmination with a simpler, preceding EDA and Visualisation project into a Clouflare and AWS hostred website via a JSON / API bridge
+FUTURE: Game theoretical approach to rein in the scenario; Host the stream of visuals on a Cloudflare powered website and Streamlit

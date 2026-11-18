@@ -312,7 +312,7 @@ class EnergyEquityScore:
                 print("Warning: 'hfce' column missing. Skipping Energy Equity Gap analysis.")
                 return None
         
-        # create the Energy Equity Score + Gap based on metrics above | respective Elec. and Solar sccores
+        # create the Trade Dependency Index + Gap, manipulated Trade Exposure Score based on metrics above | respective Elec. and Solar sccores
         # return gap_results, scaled
     
     
@@ -346,9 +346,4 @@ class EnergyEquityScore:
     
     def json_dc(self): 
         return { 
-            "pc1": None,
-            "pc2": None,
-            "energy_score": None,
-            "economic_score": None,
-            "net_ees": None,
-            "weights": None            } # placeholders
+            } # placeholders

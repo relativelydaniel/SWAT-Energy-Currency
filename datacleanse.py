@@ -4,7 +4,7 @@ from dbnomics import fetch_series
 import requests
 import json
 import time
-from config import SERIES_MAPPING
+from config import COMTRADE_PARTNER_CODE, SERIES_MAPPING
 from sqlalchemy import create_engine, text
 from sklearn.linear_model import LinearRegression 
 
@@ -25,7 +25,7 @@ class DataCleaner:
         for country in countries:
             params = {
                 "reporterCode": str(country), 
-                "partnerCode": "0",
+                "partnerCode": str(COMTRADE_PARTNER_CODE),
                 "period": "2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024",
                 "cmdCode": "854143,271600" # solar, electricity
             } 
