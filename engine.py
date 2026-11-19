@@ -307,13 +307,115 @@ class TradeExpScore:
         return pca_results, scaled
         
     
-    def energy_equity_gap(self, n_components=2):
-        if self.df is None or self.df.empty or 'hfce' not in self.df.columns:
-                print("Warning: 'hfce' column missing. Skipping Energy Equity Gap analysis.")
-                return None
-        
-        # create the Trade Dependency Index + Gap, manipulated Trade Exposure Score based on metrics above | respective Elec. and Solar sccores
-        # return gap_results, scaled
+    def calculate_tes(self, gdp_df):
+        """Calculate bilateral TES by country, energy type, and year.
+
+        Trade data must include ``iso``, ``year`` (or ``refyear``),
+        ``partnercode``, ``cmdcode``, ``flowcode``, and ``primaryvalue``.
+        GDP data must include ``iso``, ``year``, and ``gdp`` in the same
+        currency units as the trade values.
+        """
+        required_trade = {
+            "iso", "partnercode", "cmdcode", "flowcode", "primaryvalue"
+        }
+        missing_trade = required_trade.difference(self.df.columns)
+        if missing_trade:
+            raise ValueError(
+                f"Trade data is missing required columns: {sorted(missing_trade)}"
+            )
+        if "year" not in self.df.columns and "refyear" not in self.df.columns:
+            raise ValueError("Trade data must contain either 'year' or 'refyear'.")
+        required_gdp = {"iso", "year", "gdp"}
+        missing_gdp = required_gdp.difference(gdp_df.columns)
+        if missing_gdp:
+            raise ValueError(
+                f"GDP data is missing required columns: {sorted(missing_gdp)}"
+            )
+
+        trade = self.df.copy()
+        if "year" not in trade.columns:
+            trade = trade.rename(columns={"refyear": "year"})
+        trade["year"] = pd.to_numeric(trade["year"], errors="coerce")
+        trade["partnercode"] = pd.to_numeric(trade["partnercode"], errors="coerce")
+        trade["cmdcode"] = trade["cmdcode"].astype(str).str.strip()
+        trade["flowcode"] = trade["flowcode"].astype(str).str.upper().str.strip()
+        trade["primaryvalue"] = pd.to_numeric(
+            trade["primaryvalue"], errors="coerce"
+        )
+        if trade["partnercode"].isna().any():
+            raise ValueError("Trade data contains rows with an unknown partner code.")
+
+        product_codes = {"854143": "solar_pv", "271600": "electricity"}
+        trade = trade.loc[
+            trade["partnercode"].eq(156)
+            & trade["cmdcode"].isin(product_codes)
+        ].copy()
+        if trade.empty:
+            raise ValueError(
+                "No China-partner trade rows match the configured energy products."
+            )
+        if trade[["iso", "year", "flowcode", "primaryvalue"]].isna().any().any():
+            raise ValueError(
+                "Selected trade rows contain missing country, year, flow, or value."
+            )
+        if (trade["primaryvalue"] < 0).any():
+            raise ValueError("Trade values must be non-negative to calculate TES.")
+
+        invalid_flows = set(trade["flowcode"]) - {"M", "X"}
+        if invalid_flows:
+            raise ValueError(
+                f"Unsupported Comtrade flow codes: {sorted(invalid_flows)}; "
+                "expected 'M'/'X'."
+            )
+
+        trade["energy_type"] = trade["cmdcode"].map(product_codes)
+        trade["direction"] = trade["flowcode"].map(
+            {"M": "imports", "X": "exports"}
+        )
+        totals = (
+            trade.groupby(
+                ["iso", "year", "energy_type", "direction"], as_index=False
+            )["primaryvalue"]
+            .sum()
+            .pivot(
+                index=["iso", "year", "energy_type"],
+                columns="direction",
+                values="primaryvalue",
+            )
+            .reset_index()
+        )
+        totals.columns.name = None
+        for direction in ("imports", "exports"):
+            if direction not in totals.columns:
+                totals[direction] = 0.0
+            totals[direction] = totals[direction].fillna(0.0)
+        totals["total_trade"] = totals["imports"] + totals["exports"]
+
+        gdp = gdp_df[["iso", "year", "gdp"]].copy()
+        gdp["year"] = pd.to_numeric(gdp["year"], errors="coerce")
+        gdp["gdp"] = pd.to_numeric(gdp["gdp"], errors="coerce")
+        if gdp[["iso", "year", "gdp"]].isna().any().any():
+            raise ValueError(
+                "GDP data contains missing or non-numeric country, year, or GDP values."
+            )
+        if (gdp["gdp"] <= 0).any():
+            raise ValueError("GDP must be greater than zero to calculate TES.")
+        if gdp.duplicated(["iso", "year"]).any():
+            raise ValueError("GDP data must contain one value per country and year.")
+
+        result = totals.merge(
+            gdp, on=["iso", "year"], how="left", validate="many_to_one"
+        )
+        if result["gdp"].isna().any():
+            missing = result.loc[result["gdp"].isna(), ["iso", "year"]].drop_duplicates()
+            raise ValueError(
+                "GDP is missing for selected trade observations: "
+                f"{missing.to_dict(orient='records')}"
+            )
+        result["tes"] = 100 * result["total_trade"] / result["gdp"]
+        return result.sort_values(
+            ["iso", "energy_type", "year"]
+        ).reset_index(drop=True)
     
     
     def parse_sr(self, sr_expression):

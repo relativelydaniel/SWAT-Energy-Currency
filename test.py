@@ -6,7 +6,7 @@ import os
 from unittest.mock import MagicMock
 from unittest.mock import Mock
 from datacleanse import DataCleaner, Fetcher
-from engine import DataEngine
+from engine import DataEngine, TradeExpScore
 
 @pytest.fixture
 def mock_env_variables():
@@ -134,7 +134,7 @@ def test_trade_exposure_score_calculates_country_energy_year_tes():
         }
     )
 
-    result = TradeExposureScore(trade).calculate_tes(gdp)
+    result = TradeExpScore(trade).calculate_tes(gdp)
 
     solar = result.query("iso == 'GHA' and energy_type == 'solar_pv'").iloc[0]
     ghana_electricity = result.query(
@@ -166,7 +166,7 @@ def test_trade_exposure_score_requires_gdp_for_each_country_year():
     gdp = pd.DataFrame({"iso": ["NGA"], "year": [2022], "gdp": [1000.0]})
 
     with pytest.raises(ValueError, match="GDP is missing"):
-        TradeExposureScore(trade).calculate_tes(gdp)
+        TradeExpScore(trade).calculate_tes(gdp)
 
 
 def test_nans(mock_env_variables, sample_uncom_df):

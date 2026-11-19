@@ -184,7 +184,7 @@ class Fetcher():
                             'INDICATOR': ['ENDE_XDC_USD_RATE']} # exchange rate in USD
             )
             
-            # add independent HFCE (USD) dataset for energy-equity calculation
+            # add independent HFCE (USD) dataset for energy-equity calculation 
 
             hfce_df = fetch_series(
                 provider_code='WB', 
@@ -224,11 +224,22 @@ class Fetcher():
                 "year": [int(yr) for yr in nga_years],
                 "iso": ["NGA"] * len(nga_years),
             })
-
+            
             # Concatenating all 3 countries into a single DataFrame
             hfce_df = pd.concat([hfce_df, nga_imputed_df], ignore_index=True)
             hfce_df["value"] = pd.to_numeric(hfce_df["value"], errors="coerce")
-
+            
+            # Add GDP data for all countries to substantiate Trade Exposure Score calculations
+            gdp_df = fetch_series(
+                provider_code='WB',
+                dataset_code='WDI',
+                dimensions={
+                    'frequency': ['A'],
+                    'country': ['GHA', 'NGA', 'CHN'],
+                    'indicator': ['NY.GDP.MKTP.CD']
+                }
+            )
+                        
             # Define Imputation Logic
             def _fill_group(group):
                 if group["value"].isna().all() or not group["value"].isna().any():

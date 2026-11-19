@@ -3,8 +3,7 @@ import sys
 from pathlib import Path
 from datacleanse import DataCleaner, Fetcher
 from dotenv import load_dotenv
-from engine import DataEngine, EnergyEquityScore
-from models import ECModels
+from engine import DataEngine, TradeExpScore
 from config import COUNTRY_ISO_MAP
 
 base_path = Path(__file__).resolve().parent
@@ -41,23 +40,14 @@ def trilateral_analysis():
         return False
 
 def model_analysis(df, engine):
-    
-    print("\nCommencing model analysis...")
-    equity = EnergyEquityScore(df)
-    gap_results = equity.energy_equity_gap()
-    clean_df = engine.meta_clean()
-    
-    # Run PCA to reduce dimensions and extract the most significant features
-    dimension = equity.run_pca()
-    if dimension is None:
-        print("Error: PCA execution failed or returned no results.")
-        return engine, None, None
-    
-    pca_results, scaled = dimension
-    
-    models = ECModels(df, pca_results=pca_results)
-    frame = models.run_linear_regression()  # Execute the linear regression model to generate the 'frame' data
-    return engine, dimension, frame
+    print("\nCommencing Trade Exposure Score analysis...")
+    if "gdp" not in df.columns:
+        print("TES not calculated: GDP data is not yet available in the analysis table.")
+        return engine, None
+
+    gdp_df = df[["iso", "year", "gdp"]].drop_duplicates()
+    tes_results = TradeExpScore(df).calculate_tes(gdp_df)
+    return engine, tes_results
 
 def run_swat():
     
@@ -71,14 +61,14 @@ def run_swat():
     engine, cleaner, fetcher = result
 
     df = engine.df
-    engine, dimension, frame = model_analysis(df, engine)
+    engine, tes_results = model_analysis(df, engine)
 
-    if not frame: 
-        print("\nSWAT Fatal: Application dashboard execution halted due to model analysis failures.")
+    if tes_results is None:
+        print("\nTES analysis is pending GDP ingestion.")
         return
     else:
-        print("\nSWAT Success: Model analysis completed.")
-        print(f"Target: {frame['target']} | Predictor: {frame['features']} | R-Squared: {frame['r_squared']}")
+        print("\nSWAT Success: Trade Exposure Score analysis completed.")
+        print(tes_results.to_string(index=False))
         
 if __name__ == "__main__":
     try:
