@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from unittest.mock import Mock
 from datacleanse import DataCleaner, Fetcher
 from engine import DataEngine, TradeExpScore
+from main import model_analysis
 
 @pytest.fixture
 def mock_env_variables():
@@ -118,12 +119,20 @@ def test_fallback_requires_confirmed_china_partner(
 def test_trade_exposure_score_calculates_country_energy_year_tes():
     trade = pd.DataFrame(
         {
-            "iso": ["GHA", "GHA", "GHA", "GHA", "NGA"],
-            "refyear": [2022, 2022, 2022, 2022, 2022],
-            "partnercode": [156, 156, 156, 0, 156],
-            "cmdcode": ["854143", "854143", "271600", "854143", "271600"],
-            "flowcode": ["M", "X", "M", "M", "X"],
-            "primaryvalue": [20.0, 10.0, 5.0, 900.0, 8.0],
+            "iso": ["GHA", "GHA", "GHA", "GHA", "NGA", "GHA", "GHA"],
+            "refyear": [2022, 2022, 2022, 2022, 2022, 2022, 2022],
+            "partnercode": [156, 156, 156, 0, 156, 156, 156],
+            "cmdcode": [
+                854143.0,
+                854143.0,
+                271600.0,
+                854143.0,
+                271600.0,
+                "854143.0000000000000000001",
+                "271600.0000000000000000001",
+            ],
+            "flowcode": ["M", "X", "M", "M", "X", "M", "M"],
+            "primaryvalue": [20.0, 10.0, 5.0, 900.0, 8.0, 500.0, 600.0],
         }
     )
     gdp = pd.DataFrame(
@@ -167,6 +176,149 @@ def test_trade_exposure_score_requires_gdp_for_each_country_year():
 
     with pytest.raises(ValueError, match="GDP is missing"):
         TradeExpScore(trade).calculate_tes(gdp)
+
+
+def test_model_analysis_accepts_refyear_only_trade_frame():
+    df = pd.DataFrame(
+        {
+            "iso": ["GHA"],
+            "refyear": [2022],
+            "partnercode": [156],
+            "cmdcode": [854143.0],
+            "flowcode": ["M"],
+            "primaryvalue": [20.0],
+            "gdp": [1000.0],
+        }
+    )
+
+    _, result = model_analysis(df, engine=None)
+
+    assert result.loc[0, "year"] == 2022
+    assert result.loc[0, "tes"] == 2.0
+
+
+def test_fetch_all_includes_normalized_gdp_rows(mock_env_variables, monkeypatch):
+    series = [
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [5.0],
+                "series_code": ["WB.WDI.FP.CPI.TOTL.ZG.GHA"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [10.0],
+                "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE.GH"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [100.0],
+                "series_code": ["WB.WDI.NE.CON.PRVT.CD.GHA"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [2000.0],
+                "series_code": ["WB.WDI.NY.GDP.MKTP.CD.GHA"],
+            }
+        ),
+    ]
+    fetch_mock = Mock(side_effect=series)
+    monkeypatch.setattr("datacleanse.fetch_series", fetch_mock)
+    fetcher = Fetcher(db_path=mock_env_variables["db_path"])
+
+    result = fetcher.fetch_all()
+
+    gdp = result.query("type == 'gdp' and iso == 'GHA'").iloc[0]
+    assert gdp["year"] == 2022
+    assert gdp["value"] == 2000.0
+    assert fetch_mock.call_count == 4
+
+
+def test_gdp_observation_survives_engine_pivot_and_trade_join():
+    class MockCleaner:
+        def fetch_api(self, countries):
+            return pd.DataFrame(
+                {
+                    "iso": ["GHA"],
+                    "refyear": [2022],
+                    "partnercode": [156],
+                    "cmdcode": ["854143"],
+                    "flowcode": ["M"],
+                    "primaryvalue": [50.0],
+                }
+            )
+
+        def connect_database(self):
+            pass
+
+    class MockFetcher:
+        def fetch_all(self):
+            return pd.DataFrame(
+                {
+                    "iso": ["GHA", "GHA"],
+                    "year": [2022, 2022],
+                    "type": ["gdp", "inflation"],
+                    "value": [2000.0, 5.0],
+                }
+            )
+
+        def connect_database(self):
+            pass
+
+    engine = DataEngine(cleaner=MockCleaner(), fetcher=MockFetcher())
+    engine.sync_matrix({288: "GHA"})
+
+    matching = engine.df.query("iso == 'GHA' and year == 2022")
+    assert len(matching) == 1
+    assert matching.iloc[0]["gdp"] == 2000.0
+    assert matching.iloc[0]["inflation"] == 5.0
+
+
+def test_gdp_fetch_failure_preserves_fresh_non_gdp_data(
+    mock_env_variables, monkeypatch
+):
+    series = [
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [5.0],
+                "series_code": ["WB.WDI.FP.CPI.TOTL.ZG.GHA"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [10.0],
+                "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE.GH"],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "period": ["2022"],
+                "value": [100.0],
+                "series_code": ["WB.WDI.NE.CON.PRVT.CD.GHA"],
+            }
+        ),
+        RuntimeError("GDP source unavailable"),
+    ]
+    fetch_mock = Mock(side_effect=series)
+    read_fallback = Mock(side_effect=AssertionError("fallback should not run"))
+    monkeypatch.setattr("datacleanse.fetch_series", fetch_mock)
+    monkeypatch.setattr("datacleanse.pd.read_sql_table", read_fallback)
+    fetcher = Fetcher(db_path=mock_env_variables["db_path"])
+
+    result = fetcher.fetch_all()
+
+    assert {"inflation", "exchange_rate", "hfce"}.issubset(set(result["type"]))
+    assert "gdp" not in set(result["type"])
+    assert not fetcher.is_from_fallback
+    read_fallback.assert_not_called()
 
 
 def test_nans(mock_env_variables, sample_uncom_df):

@@ -9,6 +9,7 @@ from sklearn.decomposition import PCA
 import sympy as sp
 import json
 import warnings
+from decimal import Decimal, InvalidOperation
 warnings.filterwarnings('ignore')
 
 
@@ -337,7 +338,17 @@ class TradeExpScore:
             trade = trade.rename(columns={"refyear": "year"})
         trade["year"] = pd.to_numeric(trade["year"], errors="coerce")
         trade["partnercode"] = pd.to_numeric(trade["partnercode"], errors="coerce")
-        trade["cmdcode"] = trade["cmdcode"].astype(str).str.strip()
+        def normalize_cmdcode(value):
+            raw_code = str(value).strip()
+            try:
+                decimal_code = Decimal(raw_code)
+            except InvalidOperation:
+                return raw_code
+            if not decimal_code.is_finite() or decimal_code != decimal_code.to_integral_value():
+                return raw_code
+            return str(int(decimal_code))
+
+        trade["cmdcode"] = trade["cmdcode"].map(normalize_cmdcode)
         trade["flowcode"] = trade["flowcode"].astype(str).str.upper().str.strip()
         trade["primaryvalue"] = pd.to_numeric(
             trade["primaryvalue"], errors="coerce"

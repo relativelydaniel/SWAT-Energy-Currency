@@ -45,8 +45,13 @@ def model_analysis(df, engine):
         print("TES not calculated: GDP data is not yet available in the analysis table.")
         return engine, None
 
-    gdp_df = df[["iso", "year", "gdp"]].drop_duplicates()
-    tes_results = TradeExpScore(df).calculate_tes(gdp_df)
+    analysis_df = df.copy()
+    if "year" not in analysis_df.columns and "refyear" in analysis_df.columns:
+        analysis_df = analysis_df.rename(columns={"refyear": "year"})
+    if "year" not in analysis_df.columns:
+        raise ValueError("Analysis data must contain either 'year' or 'refyear'.")
+    gdp_df = analysis_df[["iso", "year", "gdp"]].drop_duplicates()
+    tes_results = TradeExpScore(analysis_df).calculate_tes(gdp_df)
     return engine, tes_results
 
 def run_swat():

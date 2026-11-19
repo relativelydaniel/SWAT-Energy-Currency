@@ -229,16 +229,50 @@ class Fetcher():
             hfce_df = pd.concat([hfce_df, nga_imputed_df], ignore_index=True)
             hfce_df["value"] = pd.to_numeric(hfce_df["value"], errors="coerce")
             
-            # Add GDP data for all countries to substantiate Trade Exposure Score calculations
-            gdp_df = fetch_series(
-                provider_code='WB',
-                dataset_code='WDI',
-                dimensions={
-                    'frequency': ['A'],
-                    'country': ['GHA', 'NGA', 'CHN'],
-                    'indicator': ['NY.GDP.MKTP.CD']
-                }
+            # GDP is optional for the macro panel; keep successfully fetched series if it fails.
+            gdp_df = pd.DataFrame(
+                columns=["period", "value", "series_code", "type", "year", "iso"]
             )
+            try:
+                fetched_gdp = fetch_series(
+                    provider_code='WB',
+                    dataset_code='WDI',
+                    dimensions={
+                        'frequency': ['A'],
+                        'country': ['GHA', 'NGA', 'CHN'],
+                        'indicator': ['NY.GDP.MKTP.CD']
+                    }
+                )
+                if fetched_gdp is not None and not fetched_gdp.empty:
+                    gdp_df = fetched_gdp.copy()
+                    missing_gdp_columns = {"period", "value", "series_code"}.difference(
+                        gdp_df.columns
+                    )
+                    if missing_gdp_columns:
+                        raise ValueError(
+                            "GDP series is missing required columns: "
+                            f"{sorted(missing_gdp_columns)}"
+                        )
+                    gdp_df["type"] = "gdp"
+                    gdp_df["year"] = pd.to_datetime(
+                        gdp_df["period"], errors="coerce"
+                    ).dt.year
+                    if "iso" not in gdp_df.columns:
+                        gdp_df["iso"] = np.nan
+                    if "series_code" in gdp_df.columns:
+                        code_iso = gdp_df["series_code"].astype(str).str.extract(
+                            r"(GHA|NGA|CHN)$", expand=False
+                        )
+                        gdp_df["iso"] = gdp_df["iso"].fillna(code_iso)
+                    if gdp_df[["year", "iso"]].isna().any().any():
+                        raise ValueError(
+                            "GDP series is missing usable year or country keys."
+                        )
+            except Exception as gdp_error:
+                print(f"Warning: GDP fetch failed; continuing without GDP: {gdp_error}")
+                gdp_df = pd.DataFrame(
+                    columns=["period", "value", "series_code", "type", "year", "iso"]
+                )
                         
             # Define Imputation Logic
             def _fill_group(group):
@@ -274,7 +308,7 @@ class Fetcher():
 
             if wb_df.empty and imf_df.empty and hfce_df.empty:
                 raise Exception("DB Nomics returned an empty dataset for all providers.")
-            fetched_df = pd.concat([wb_df, imf_df, hfce_df], ignore_index=True) # sticks into master table
+            fetched_df = pd.concat([wb_df, imf_df, hfce_df, gdp_df], ignore_index=True) # sticks into master table
 
             df_cleaned = pd.DataFrame({
                 "period": fetched_df["period"],
@@ -283,17 +317,24 @@ class Fetcher():
             })
 
             def assign_type(series_code):
-                code_upper = series_code.upper()
+                code_upper = str(series_code).upper()
                 if 'CPI' in code_upper or 'INFLATION' in code_upper:
                     return 'inflation'
                 elif 'ENDE_XDC_USD_RATE' in code_upper or 'EXCHANGE' in code_upper:
                     return 'exchange_rate'
+                elif 'GDP' in code_upper:
+                    return 'gdp'
                 elif 'CON' in code_upper or 'HFCE' in code_upper or 'CONSUMPTION' in code_upper:
                     return 'hfce'
                 else:
                     return 'unknown'
                 
             df_cleaned["type"] = df_cleaned["series_code"].apply(assign_type)
+            if "type" in fetched_df.columns:
+                unknown_types = df_cleaned["type"].eq("unknown")
+                df_cleaned.loc[unknown_types, "type"] = fetched_df.loc[
+                    unknown_types, "type"
+                ].fillna("unknown")
                                     
             df_cleaned["year"] = pd.to_datetime(df_cleaned['period'], errors='coerce').dt.year.astype(int)
             df_cleaned = df_cleaned[df_cleaned["year"].between(2014, 2024)]
