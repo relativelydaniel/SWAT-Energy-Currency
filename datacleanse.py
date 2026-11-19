@@ -72,15 +72,32 @@ class DataCleaner:
                         self.name, 
                         con=conn, 
                         schema='Trade Intelligence')
-                    if not self.df.empty:
-                        print("Warning: API fetch failed. Using existing database data.")
-                        self.is_from_fallback = True
-                        return self.df
-                    else:
-                        raise Exception("No existing data available in the database.")
-            except Exception as e:
-                print(f"Database fetch failed: {e}")
-                raise Exception(f"Critical pipeline error: {e}")
+                    if self.df.empty:
+                        raise ValueError("No existing data available in the database.")
+                    if 'partnercode' not in self.df.columns:
+                        raise ValueError(
+                            "Cached trade data has no partnercode; its partner scope cannot be confirmed."
+                        )
+                    partner_codes = pd.to_numeric(
+                        self.df['partnercode'], errors='coerce'
+                    )
+                    if partner_codes.isna().any() or not partner_codes.eq(
+                        COMTRADE_PARTNER_CODE
+                    ).all():
+                        raise ValueError(
+                            f"Cached trade data is not confirmed as China-partner data "
+                            f"(partner code {COMTRADE_PARTNER_CODE})."
+                        )
+                    print("Warning: API fetch failed. Using China-partner database data.")
+                    self.is_from_fallback = True
+                    return self.df
+            except Exception as db_error:
+                print(f"Database fetch failed: {db_error}")
+                raise RuntimeError(
+                    f"Critical pipeline error: API fetch failed; cached trade data "
+                    f"is unavailable or not confirmed for partner "
+                    f"{COMTRADE_PARTNER_CODE}: {db_error}"
+                ) from db_error
     
     def standardise_columns(self):
         if self.df is not None and not self.df.empty:
@@ -107,7 +124,7 @@ class DataCleaner:
         self.df[numeric_cols] = self.df[numeric_cols].fillna(0)
         
         metadata_cols = [
-            'refperiodid', 'refmonth', 'partnercode', 'partner2code', 
+            'refperiodid', 'refmonth', 'partner2code',
             'motcode', 'qtyunitcode', 'altqtyunitcode', 'legacyestimationflag'
         ]
         

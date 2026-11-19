@@ -60,7 +60,7 @@ def test_comtrade_fetch_uses_china_as_partner(mock_env_variables, monkeypatch):
     response = Mock()
     response.status_code = 200
     response.json.return_value = {
-        "dataset": [{"refYear": 2022, "primaryValue": 10.0}]
+        "dataset": [{"refYear": 2022, "partnerCode": 156, "primaryValue": 10.0}]
     }
     request = Mock(return_value=response)
     monkeypatch.setattr("datacleanse.requests.get", request)
@@ -77,6 +77,96 @@ def test_comtrade_fetch_uses_china_as_partner(mock_env_variables, monkeypatch):
         call.kwargs["params"]["partnerCode"] == "156"
         for call in request.call_args_list
     )
+    assert cleaner.df["partnercode"].eq(156).all()
+
+
+@pytest.mark.parametrize(
+    "cached_df, accepted",
+    [
+        (pd.DataFrame({"partnercode": [156]}), True),
+        (pd.DataFrame({"partnercode": [0]}), False),
+        (pd.DataFrame({"partnercode": [156, 0]}), False),
+        (pd.DataFrame({"partnercode": [156, np.nan]}), False),
+        (pd.DataFrame({"reportercode": [288]}), False),
+    ],
+)
+def test_fallback_requires_confirmed_china_partner(
+    mock_env_variables, monkeypatch, cached_df, accepted
+):
+    cleaner = DataCleaner(
+        db_path=mock_env_variables["db_path"],
+        api_url=mock_env_variables["api_url"],
+        api_key=mock_env_variables["api_key"],
+    )
+    response = Mock(status_code=503)
+    monkeypatch.setattr("datacleanse.requests.get", Mock(return_value=response))
+    monkeypatch.setattr("datacleanse.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "datacleanse.pd.read_sql_table", Mock(return_value=cached_df.copy())
+    )
+
+    if accepted:
+        result = cleaner.fetch_api({288: "GHA"})
+        assert cleaner.is_from_fallback
+        assert result["partnercode"].eq(156).all()
+    else:
+        with pytest.raises(RuntimeError, match="not confirmed"):
+            cleaner.fetch_api({288: "GHA"})
+        assert not cleaner.is_from_fallback
+
+
+def test_trade_exposure_score_calculates_country_energy_year_tes():
+    trade = pd.DataFrame(
+        {
+            "iso": ["GHA", "GHA", "GHA", "GHA", "NGA"],
+            "refyear": [2022, 2022, 2022, 2022, 2022],
+            "partnercode": [156, 156, 156, 0, 156],
+            "cmdcode": ["854143", "854143", "271600", "854143", "271600"],
+            "flowcode": ["M", "X", "M", "M", "X"],
+            "primaryvalue": [20.0, 10.0, 5.0, 900.0, 8.0],
+        }
+    )
+    gdp = pd.DataFrame(
+        {
+            "iso": ["GHA", "NGA"],
+            "year": [2022, 2022],
+            "gdp": [1000.0, 400.0],
+        }
+    )
+
+    result = TradeExposureScore(trade).calculate_tes(gdp)
+
+    solar = result.query("iso == 'GHA' and energy_type == 'solar_pv'").iloc[0]
+    ghana_electricity = result.query(
+        "iso == 'GHA' and energy_type == 'electricity'"
+    ).iloc[0]
+    nigeria_electricity = result.query(
+        "iso == 'NGA' and energy_type == 'electricity'"
+    ).iloc[0]
+    assert solar["imports"] == 20.0
+    assert solar["exports"] == 10.0
+    assert solar["total_trade"] == 30.0
+    assert solar["tes"] == 3.0
+    assert ghana_electricity["tes"] == 0.5
+    assert nigeria_electricity["tes"] == 2.0
+    assert len(result) == 3
+
+
+def test_trade_exposure_score_requires_gdp_for_each_country_year():
+    trade = pd.DataFrame(
+        {
+            "iso": ["GHA"],
+            "year": [2022],
+            "partnercode": [156],
+            "cmdcode": ["854143"],
+            "flowcode": ["M"],
+            "primaryvalue": [20.0],
+        }
+    )
+    gdp = pd.DataFrame({"iso": ["NGA"], "year": [2022], "gdp": [1000.0]})
+
+    with pytest.raises(ValueError, match="GDP is missing"):
+        TradeExposureScore(trade).calculate_tes(gdp)
 
 
 def test_nans(mock_env_variables, sample_uncom_df):

@@ -233,9 +233,9 @@ class DataEngine:
  
  
  # Calculations - guided with PCA + OLS
- # Energy Equity Score Gap (consumer spending + energy value(s) as key inds)
+ # Trade Exposure Score Gap (economic + energy value(s) as key inds)
  
-class EnergyEquityScore:
+class TradeExpScore:
     def __init__(self, df):
         self.df = df
         self.features = ['netwgt', 'inflation', 'exchange_rate', 'primaryvalue'] # Store feature names for Symbolic Regression reminiscent weighting
