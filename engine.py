@@ -56,9 +56,11 @@ class DataEngine:
             ).reset_index()
 
             # GUARD: Guarantee required macro columns exist in db_pivot
-            for required_col in ['exchange_rate', 'inflation', 'hfce']:
+            for required_col in ['exchange_rate', 'inflation', 'hfce', 'gdp']:
                 if required_col not in db_pivot.columns:
                     db_pivot[required_col] = np.nan
+            if db_pivot["gdp"].isna().all():
+                raise ValueError("Required GDP series has no usable values after pivot.")
 
             # Forward/backward fill exchange_rate and inflation per ISO
             predictor_cols = ['exchange_rate', 'inflation']
@@ -350,6 +352,7 @@ class TradeExpScore:
 
         trade["cmdcode"] = trade["cmdcode"].map(normalize_cmdcode)
         trade["flowcode"] = trade["flowcode"].astype(str).str.upper().str.strip()
+        trade = trade.loc[trade["flowcode"].isin({"M", "X"})].copy()
         trade["primaryvalue"] = pd.to_numeric(
             trade["primaryvalue"], errors="coerce"
         )
@@ -404,11 +407,15 @@ class TradeExpScore:
 
         gdp = gdp_df[["iso", "year", "gdp"]].copy()
         gdp["year"] = pd.to_numeric(gdp["year"], errors="coerce")
+        raw_gdp = gdp["gdp"]
         gdp["gdp"] = pd.to_numeric(gdp["gdp"], errors="coerce")
-        if gdp[["iso", "year", "gdp"]].isna().any().any():
+        if gdp[["iso", "year"]].isna().any().any():
             raise ValueError(
-                "GDP data contains missing or non-numeric country, year, or GDP values."
+                "GDP data contains missing or non-numeric country/year keys."
             )
+        nonnumeric_gdp = raw_gdp.notna() & gdp["gdp"].isna()
+        if nonnumeric_gdp.any():
+            raise ValueError("GDP data contains non-numeric GDP values.")
         if (gdp["gdp"] <= 0).any():
             raise ValueError("GDP must be greater than zero to calculate TES.")
         if gdp.duplicated(["iso", "year"]).any():
@@ -418,11 +425,13 @@ class TradeExpScore:
             gdp, on=["iso", "year"], how="left", validate="many_to_one"
         )
         if result["gdp"].isna().any():
-            missing = result.loc[result["gdp"].isna(), ["iso", "year"]].drop_duplicates()
+            missing = result.loc[
+                result["gdp"].isna(), ["iso", "energy_type", "year"]
+            ].to_dict(orient="records")
             raise ValueError(
-                "GDP is missing for selected trade observations: "
-                f"{missing.to_dict(orient='records')}"
+                f"GDP is required to calculate TES; missing observations: {missing}"
             )
+            
         result["tes"] = 100 * result["total_trade"] / result["gdp"]
         return result.sort_values(
             ["iso", "energy_type", "year"]

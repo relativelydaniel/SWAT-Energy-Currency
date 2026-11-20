@@ -42,8 +42,7 @@ def trilateral_analysis():
 def model_analysis(df, engine):
     print("\nCommencing Trade Exposure Score analysis...")
     if "gdp" not in df.columns:
-        print("TES not calculated: GDP data is not yet available in the analysis table.")
-        return engine, None
+        raise ValueError("Required GDP data is missing from the analysis table.")
 
     analysis_df = df.copy()
     if "year" not in analysis_df.columns and "refyear" in analysis_df.columns:
@@ -66,14 +65,17 @@ def run_swat():
     engine, cleaner, fetcher = result
 
     df = engine.df
-    engine, tes_results = model_analysis(df, engine)
-
-    if tes_results is None:
-        print("\nTES analysis is pending GDP ingestion.")
+    try:
+        engine, tes_results = model_analysis(df, engine)
+    except ValueError as e:
+        print(
+            "\nSWAT Fatal: Application dashboard execution halted due to "
+            f"model analysis failures: {e}"
+        )
         return
-    else:
-        print("\nSWAT Success: Trade Exposure Score analysis completed.")
-        print(tes_results.to_string(index=False))
+
+    print("\nSWAT Success: Trade Exposure Score analysis completed.")
+    print(tes_results.to_string(index=False))
         
 if __name__ == "__main__":
     try:
