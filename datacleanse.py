@@ -1,11 +1,14 @@
 import pandas as pd
 import numpy as np
 from dbnomics import fetch_series
+import wbgapi as wb 
 import requests
 import json
 import time
-from config import SERIES_MAPPING
-from sqlalchemy import create_engine, text
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from config import COMTRADE_PARTNER_CODE
+from sqlalchemy import create_engine
 from sklearn.linear_model import LinearRegression 
 
 class DataCleaner:
@@ -22,43 +25,74 @@ class DataCleaner:
     def fetch_api(self, countries):
         print("Executing API ingestion from UNCOM Trade...")
         frames = []
+        fetch_errors = []
+        max_attempts = 3
         for country in countries:
             params = {
                 "reporterCode": str(country), 
-                "partnerCode": "0",
+                "partnerCode": str(COMTRADE_PARTNER_CODE),
                 "period": "2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024",
                 "cmdCode": "854143,271600" # solar, electricity
-            }
+            } 
+            # soon will subsitute with the params in CONFIG file
             headers = {"Ocp-Apim-Subscription-Key": self.api_key}
             
-            while True:
+            country_data = None
+            for attempt in range(max_attempts):
                 try:
-                    response = requests.get(self.api_url, params=params, headers=headers)
+                    response = requests.get(
+                        self.api_url, params=params, headers=headers, timeout=30
+                    )
+                    if response.status_code == 429:
+                        if attempt == max_attempts - 1:
+                            fetch_errors.append(
+                                f"{country}: rate limit persisted after {max_attempts} attempts"
+                            )
+                            break
+                        retry_after = response.headers.get("Retry-After")
+                        delay = 1.0
+                        if retry_after:
+                            try:
+                                delay = max(0.0, float(retry_after))
+                            except (TypeError, ValueError):
+                                try:
+                                    retry_time = parsedate_to_datetime(retry_after)
+                                    if retry_time.tzinfo is None:
+                                        retry_time = retry_time.replace(
+                                            tzinfo=timezone.utc
+                                        )
+                                    delay = max(
+                                        0.0,
+                                        (
+                                            retry_time - datetime.now(timezone.utc)
+                                        ).total_seconds(),
+                                    )
+                                except (TypeError, ValueError, OverflowError):
+                                    delay = 1.0
+                        time.sleep(min(delay, 60.0))
+                        continue
                     if response.status_code == 200:
                         result = response.json()
                         data = result.get("dataset") or result.get("data")
                         if data:
-                            df_temp = pd.json_normalize(data) # flatten the JSON structure
-                            country_iso_map = {288: "GHA", 566: "NGA", 156: "CHN"}
-                            df_temp['iso'] = country_iso_map.get(int(country), "UNKNOWN")
-                            frames.append(df_temp)
-                            print(f"Successfully fetched {country}")
+                            country_data = pd.json_normalize(data)
                         else:
-                            print(f"No data found for {country}")
-                        break 
-                    elif response.status_code == 429:
-                        print("Rate limit hit, sleeping...")
-                        time.sleep(5)
-                        continue 
+                            fetch_errors.append(f"{country}: API returned no data")
+                        break
                     else:
-                        print(f"Error {country}: {response.status_code}")
-                        break # Exit retry loop on hard errors
+                        fetch_errors.append(f"{country}: HTTP {response.status_code}")
+                        break
                 except Exception as e:
-                    print(f"Failed {country}: {e}")
+                    fetch_errors.append(f"{country}: {e}")
                     break
+            if country_data is not None:
+                country_iso_map = {288: "GHA", 566: "NGA", 156: "CHN"}
+                country_data["iso"] = country_iso_map.get(int(country), "UNKNOWN")
+                frames.append(country_data)
+                print(f"Successfully fetched {country}")
             time.sleep(1.1)
 
-        if frames:
+        if frames and not fetch_errors:
             self.is_from_fallback = False
             self.df = pd.concat(frames, ignore_index=True)
             self.standardise_columns()
@@ -66,20 +100,58 @@ class DataCleaner:
             return self.df
         else:
             try:
+                if fetch_errors:
+                    print(
+                        "Warning: Comtrade fetch incomplete; discarding partial API "
+                        f"results and checking database fallback. Details: {fetch_errors}"
+                    )
                 with self.engine.connect() as conn:
                     self.df = pd.read_sql_table(
                         self.name, 
                         con=conn, 
                         schema='Trade Intelligence')
-                    if not self.df.empty:
-                        print("Warning: API fetch failed. Using existing database data.")
-                        self.is_from_fallback = True
-                        return self.df
-                    else:
-                        raise Exception("No existing data available in the database.")
-            except Exception as e:
-                print(f"Database fetch failed: {e}")
-                raise Exception(f"Critical pipeline error: {e}")
+                    if self.df.empty:
+                        raise ValueError("No existing data available in the database.")
+                    if 'partnercode' not in self.df.columns:
+                        raise ValueError(
+                            "Cached trade data has no partnercode; its partner scope cannot be confirmed."
+                        )
+                    if "reportercode" not in self.df.columns:
+                        raise ValueError(
+                            "Cached trade data has no reportercode; its country coverage cannot be confirmed."
+                        )
+                    partner_codes = pd.to_numeric(
+                        self.df['partnercode'], errors='coerce'
+                    )
+                    if partner_codes.isna().any() or not partner_codes.eq(
+                        COMTRADE_PARTNER_CODE
+                    ).all():
+                        raise ValueError(
+                            f"Cached trade data is not confirmed as China-partner data "
+                            f"(partner code {COMTRADE_PARTNER_CODE})."
+                        )
+                    reporter_codes = pd.to_numeric(
+                        self.df["reportercode"], errors="coerce"
+                    )
+                    requested_reporters = {int(country) for country in countries}
+                    if (
+                        reporter_codes.isna().any()
+                        or not requested_reporters.issubset(set(reporter_codes))
+                    ):
+                        raise ValueError(
+                            "Cached trade data is missing one or more requested reporters; "
+                            "country coverage cannot be confirmed."
+                        )
+                    print("Warning: API fetch failed. Using China-partner database data.")
+                    self.is_from_fallback = True
+                    return self.df
+            except Exception as db_error:
+                print(f"Database fetch failed: {db_error}")
+                raise RuntimeError(
+                    f"Critical pipeline error: API fetch failed; cached trade data "
+                    f"is unavailable or not confirmed for partner "
+                    f"{COMTRADE_PARTNER_CODE}: {db_error}"
+                ) from db_error
     
     def standardise_columns(self):
         if self.df is not None and not self.df.empty:
@@ -102,11 +174,8 @@ class DataCleaner:
         print(self.df.dtypes)
         print(self.df.info())
         
-        numeric_cols = self.df.select_dtypes(include=['number']).columns
-        self.df[numeric_cols] = self.df[numeric_cols].fillna(0)
-        
         metadata_cols = [
-            'refperiodid', 'refmonth', 'partnercode', 'partner2code', 
+            'refperiodid', 'refmonth', 'partner2code',
             'motcode', 'qtyunitcode', 'altqtyunitcode', 'legacyestimationflag'
         ]
         
@@ -117,7 +186,6 @@ class DataCleaner:
         
         return self.df
 
-        pass # Sub function for formatting - prints the formatted version via lamda function
 
     def connect_database(self, db_path = None):
         if self.df is None or self.df.empty:
@@ -142,6 +210,7 @@ class DataCleaner:
         except Exception as e:
             print(f"CRITICAL ERROR during database load: {e}")
 
+
 class Fetcher(): 
     def __init__(self, db_path):
         self.db_path = db_path
@@ -152,13 +221,13 @@ class Fetcher():
 
         
     def fetch_all(self): 
-        print(f"Executing batch ingestion from DB Nomics...")
+        print(f"Executing batch ingestion from WB + DB Nomics...")
+        # set period 2014-24
         try:
-            wb_df = fetch_series(provider_code='WB', dataset_code='WDI',
-                dimensions={'frequency': ['A'], # annual
-                            'country': ['GHA', 'NGA', 'CHN'], # country isos
-                            'indicator': ['FP.CPI.TOTL.ZG']} # inflation per consumer price index
-            )
+            for country in str(COMTRADE_PARTNER_CODE).split(','):
+                wb_df = wb.series.info(['FP.CPI.TOTL.ZG']) # fetch from World Bank WDI dataset for inflation per consumer price 
+                gdp_df = wb.series.info(['NY.GDP.MKTP.CD']) # WDI dataset - current GDP
+                curr_bal_df = wb.series.info(['BN.CAB.XOKA.CD']) # WDI dataset - current account balance to replace HFCE
             
             imf_df = fetch_series(provider_code='IMF', dataset_code='IFS',
                 dimensions={'FREQ': ['A'], 
@@ -166,51 +235,61 @@ class Fetcher():
                             'INDICATOR': ['ENDE_XDC_USD_RATE']} # exchange rate in USD
             )
             
-            # add independent HFCE (USD) dataset for energy-equity calculation
-
-            hfce_df = fetch_series(
-                provider_code='WB', 
-                dataset_code='WDI',
-                dimensions={
-                    'frequency': ['A'], 
-                    'country': ['GHA', 'CHN'], # Exclude NGA from API call to prevent NaN conflicts
-                    'indicator': ['NE.CON.PRVT.CD']
-                }
+            
+    
+            
+            if gdp_df is None or gdp_df.empty:
+                raise ValueError("Required GDP API request returned no observations.")
+            missing_columns = {"period", "value", "series_code"}.difference(
+                gdp_df.columns
             )
-
-            hfce_df['type'] = 'hfce'
-            if 'series_code' not in hfce_df.columns or hfce_df['series_code'].isna().any():
-                hfce_df['series_code'] = hfce_df['series_code'].fillna('A-NE.CON.PRVT.CD-HFCE')
-            hfce_df['year'] = pd.to_datetime(hfce_df['period']).dt.year
-
-            if "iso" not in hfce_df.columns:
-                hfce_df["iso"] = hfce_df["series_code"].str.split("-").str[-1]
-
-            nga_years = list(range(2014, 2025))
-            nga_values_raw = [
-                412e9,
-                387e9,
-                330e9,
-                301e9,
-                323e9,
-                354e9,
-                276e9,
-                274e9,
-            ] + [np.nan, np.nan, np.nan]
-
-            nga_imputed_df = pd.DataFrame({
-                "period": [pd.Timestamp(f"{yr}-01-01") for yr in nga_years],
-                "value": nga_values_raw,
-                "series_code": ["A-NE.CON.PRVT.CD-NGA"] * len(nga_years),
-                "type": ["hfce"] * len(nga_years),
-                "year": [int(yr) for yr in nga_years],
-                "iso": ["NGA"] * len(nga_years),
-            })
-
-            # Concatenating all 3 countries into a single DataFrame
-            hfce_df = pd.concat([hfce_df, nga_imputed_df], ignore_index=True)
-            hfce_df["value"] = pd.to_numeric(hfce_df["value"], errors="coerce")
-
+            if missing_columns:
+                raise ValueError(
+                    f"GDP series is missing columns: {sorted(missing_columns)}"
+                )
+            gdp_df = gdp_df.copy()
+            gdp_df["type"] = "gdp"
+            gdp_df["year"] = pd.to_datetime(
+                gdp_df["period"], errors="coerce"
+            ).dt.year
+            if "iso" not in gdp_df.columns:
+                gdp_df["iso"] = np.nan
+            code_iso = gdp_df["series_code"].astype(str).str.extract(
+                r"(GHA|NGA|CHN)$", expand=False
+            )
+            gdp_df["iso"] = gdp_df["iso"].fillna(code_iso)
+            if gdp_df[["year", "iso"]].isna().any().any():
+                raise ValueError("GDP series has missing country or year keys.")
+            gdp_df["iso"] = gdp_df["iso"].astype("string").str.strip().str.upper()
+            # Keep DBnomics for NGA through 2018; use the current WB source afterward.
+            gdp_df = gdp_df.loc([(
+                    gdp_df["iso"].eq("NGA")
+                    & gdp_df["year"].between(2019, 2024)
+                )])
+            
+            gdp_df = pd.concat(
+                [gdp_df], ignore_index=True
+            )
+            gdp_df["iso"] = gdp_df["iso"].astype("string").str.strip().str.upper()
+            gdp_df["year"] = pd.to_numeric(gdp_df["year"], errors="coerce")
+            nga_recent_gdp = gdp_df.loc[
+                gdp_df["iso"].eq("NGA") & gdp_df["year"].between(2019, 2024)
+            ]
+            expected_nga_years = set(range(2019, 2025))
+            invalid_nga_years = (
+                nga_recent_gdp["year"].isna()
+                | nga_recent_gdp["year"].mod(1).ne(0)
+            )
+            if (
+                invalid_nga_years.any()
+                or nga_recent_gdp["year"].duplicated().any()
+                or set(nga_recent_gdp["year"].astype(int)) != expected_nga_years
+            ):
+                raise ValueError(
+                    "NGA GDP must contain exactly one observation for each "
+                    "integer year from 2019 through 2024."
+                )
+                        
             # Define Imputation Logic
             def _fill_group(group):
                 if group["value"].isna().all() or not group["value"].isna().any():
@@ -244,8 +323,8 @@ class Fetcher():
             )
 
             if wb_df.empty and imf_df.empty and hfce_df.empty:
-                raise Exception("DB Nomics returned an empty dataset for all providers.")
-            fetched_df = pd.concat([wb_df, imf_df, hfce_df], ignore_index=True) # sticks into master table
+                raise Exception("WB-DBN returned an empty dataset for all providers.")
+            fetched_df = pd.concat([wb_df, imf_df, curr_bal_df,  gdp_df], ignore_index=True) # sticks into master table
 
             df_cleaned = pd.DataFrame({
                 "period": fetched_df["period"],
@@ -254,25 +333,107 @@ class Fetcher():
             })
 
             def assign_type(series_code):
-                code_upper = series_code.upper()
+                code_upper = str(series_code).upper()
                 if 'CPI' in code_upper or 'INFLATION' in code_upper:
                     return 'inflation'
                 elif 'ENDE_XDC_USD_RATE' in code_upper or 'EXCHANGE' in code_upper:
                     return 'exchange_rate'
-                elif 'CON' in code_upper or 'HFCE' in code_upper or 'CONSUMPTION' in code_upper:
-                    return 'hfce'
+                elif 'GDP' in code_upper:
+                    return 'gdp'
+               # current account balance is used to replace HFCE
+                elif 'BN.CAB.XOKA.CD' in code_upper or 'CURRENT_ACCOUNT_BALANCE' in code_upper:
+                    return 'current_account_balance'
                 else:
                     return 'unknown'
                 
-            df_cleaned["type"] = df_cleaned["series_code"].apply(assign_type)
-                                    
-            df_cleaned["year"] = pd.to_datetime(df_cleaned['period'], errors='coerce').dt.year.astype(int)
+            inferred_type = df_cleaned["series_code"].apply(assign_type)
+            if "type" in fetched_df.columns:
+                df_cleaned["type"] = fetched_df["type"].fillna(inferred_type)
+            else:
+                df_cleaned["type"] = inferred_type
+
+            if "year" in fetched_df.columns:
+                df_cleaned["year"] = pd.to_numeric(
+                    fetched_df["year"], errors="coerce"
+                )
+            else:
+                df_cleaned["year"] = np.nan
+            period_year = pd.to_datetime(
+                df_cleaned["period"], errors="coerce"
+            ).dt.year
+            
+            df_cleaned["year"] = df_cleaned["year"].fillna(period_year)
+            if df_cleaned["year"].isna().any():
+                raise ValueError("Fetched macro data contains rows without a valid year.")
+            df_cleaned["year"] = df_cleaned["year"].astype(int)
             df_cleaned = df_cleaned[df_cleaned["year"].between(2014, 2024)]
             
-            df_cleaned["iso"] = fetched_df.get("iso", "UNKNOWN") 
-            df_cleaned.loc[df_cleaned["series_code"].str.contains("GHA|GH", na=False), "iso"] = "GHA"
-            df_cleaned.loc[df_cleaned["series_code"].str.contains("NGA|NG", na=False), "iso"] = "NGA"
-            df_cleaned.loc[df_cleaned["series_code"].str.contains("CHN|CN", na=False), "iso"] = "CHN"
+            country_aliases = {
+                "GHA": "GHA",
+                "GH": "GHA",
+                "GHANA": "GHA",
+                "NGA": "NGA",
+                "NG": "NGA",
+                "NIGERIA": "NGA",
+                "CHN": "CHN",
+                "CN": "CHN",
+                "CHINA": "CHN",
+            }
+            if "iso" in fetched_df.columns:
+                raw_iso = (
+                    fetched_df["iso"].astype("string").str.upper().str.strip()
+                )
+                df_cleaned["iso"] = raw_iso.map(country_aliases)
+            else:
+                df_cleaned["iso"] = np.nan
+            for country_column in (
+                "REF_AREA",
+                "ref_area",
+                "country_code",
+                "country",
+                "COUNTRY",
+            ):
+                if country_column in fetched_df.columns:
+                    dimension_iso = fetched_df[country_column].astype(
+                        "string"
+                    ).str.upper().str.strip().map(country_aliases)
+                    df_cleaned["iso"] = df_cleaned["iso"].fillna(dimension_iso)
+            code_iso = df_cleaned["series_code"].astype(str).str.extract(
+                r"(?:^|[-._])(GHA|NGA|CHN|GH|NG|CN)$", expand=False
+            )
+            code_iso = code_iso.replace(
+                {"GH": "GHA", "NG": "NGA", "CN": "CHN"}
+            )
+            df_cleaned["iso"] = df_cleaned["iso"].fillna(code_iso)
+            if df_cleaned["iso"].isna().any():
+                unresolved = fetched_df.loc[
+                    df_cleaned["iso"].isna(),
+                    [
+                        column
+                        for column in (
+                            "type",
+                            "series_code",
+                            "iso",
+                            "REF_AREA",
+                            "ref_area",
+                            "country_code",
+                            "country",
+                        )
+                        if column in fetched_df.columns
+                    ],
+                ].drop_duplicates()
+                raise ValueError(
+                    "Fetched macro data contains rows without a valid country "
+                    f"code: {unresolved.to_dict(orient='records')}"
+                )
+            gdp_rows = df_cleaned["type"].eq("gdp")
+            if not gdp_rows.any() or not df_cleaned.loc[gdp_rows, "value"].notna().any():
+                raise ValueError("Required GDP series is absent from fetched macro data.")
+            gdp_values = df_cleaned.loc[gdp_rows, "value"].dropna()
+            if (gdp_values <= 0).any():
+                raise ValueError(
+                    "Required GDP series contains non-positive values."
+                )
 
             self.df = df_cleaned
             self.is_from_fallback = False
@@ -288,11 +449,11 @@ class Fetcher():
                         self.name, 
                         con=conn, 
                         schema='Trade Intelligence')
-                    if not self.df.empty:
+                if not self.df.empty:
                         print("Warning: API fetch failed. Using existing database data.")
                         self.is_from_fallback = True
                         return self.df
-                    else:
+                else:
                         raise Exception("No existing data available in the database.")
             except Exception as db_e:
                 print(f"Database fetch failed: {db_e}")
@@ -361,7 +522,7 @@ class Fetcher():
             },
             
             "countries": {
-                "reporting": [288, 566, 156],
+                "reporting": [288, 566],
                 "iso_mapping": {
                     "288": "GHA",
                     "566": "NGA",
