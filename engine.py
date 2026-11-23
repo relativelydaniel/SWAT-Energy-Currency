@@ -56,7 +56,7 @@ class DataEngine:
             ).reset_index()
 
             # GUARD: Guarantee required macro columns exist in db_pivot
-            for required_col in ['exchange_rate', 'inflation', 'hfce', 'gdp']:
+            for required_col in ['exchange_rate', 'inflation', 'gdp']:
                 if required_col not in db_pivot.columns:
                     db_pivot[required_col] = np.nan
             if db_pivot["gdp"].isna().all():
@@ -154,7 +154,7 @@ class DataEngine:
             print(df[energy_cols].apply(pd.to_numeric, errors='coerce').corr())
             
         if target_cols:
-            print("\n=== DBN MACROECONOMIC CORRELATION ===")
+            print("\n=== WB-DBN MACROECONOMIC CORRELATION ===")
             print(df[target_cols].apply(pd.to_numeric, errors='coerce').corr())
 
         if target_cols and energy_cols:

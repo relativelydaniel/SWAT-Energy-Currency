@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from dbnomics import fetch_series
+from wbgapi import fetch_series as wb 
 import requests
 import json
 import time
@@ -209,6 +210,7 @@ class DataCleaner:
         except Exception as e:
             print(f"CRITICAL ERROR during database load: {e}")
 
+
 class Fetcher(): 
     def __init__(self, db_path):
         self.db_path = db_path
@@ -225,7 +227,7 @@ class Fetcher():
                 dimensions={'frequency': ['A'], # annual
                             'country': ['GHA', 'NGA', 'CHN'], # country isos
                             'indicator': ['FP.CPI.TOTL.ZG']} # inflation per consumer price index
-            )
+            ) # fetch from World Bank WDI dataset for inflation
             
             imf_df = fetch_series(provider_code='IMF', dataset_code='IFS',
                 dimensions={'FREQ': ['A'], 
@@ -233,50 +235,8 @@ class Fetcher():
                             'INDICATOR': ['ENDE_XDC_USD_RATE']} # exchange rate in USD
             )
             
-            # add independent HFCE (USD) dataset for energy-equity calculation 
-
-            hfce_df = fetch_series(
-                provider_code='WB', 
-                dataset_code='WDI',
-                dimensions={
-                    'frequency': ['A'], 
-                    'country': ['GHA', 'CHN'], # Exclude NGA from API call to prevent NaN conflicts
-                    'indicator': ['NE.CON.PRVT.CD']
-                }
-            )
-
-            hfce_df['type'] = 'hfce'
-            if 'series_code' not in hfce_df.columns or hfce_df['series_code'].isna().any():
-                hfce_df['series_code'] = hfce_df['series_code'].fillna('A-NE.CON.PRVT.CD-HFCE')
-            hfce_df['year'] = pd.to_datetime(hfce_df['period']).dt.year
-
-            if "iso" not in hfce_df.columns:
-                hfce_df["iso"] = hfce_df["series_code"].str.split("-").str[-1]
-
-            nga_years = list(range(2014, 2025))
-            nga_values_raw = [
-                412e9,
-                387e9,
-                330e9,
-                301e9,
-                323e9,
-                354e9,
-                276e9,
-                274e9,
-            ] + [np.nan, np.nan, np.nan]
-
-            nga_imputed_df = pd.DataFrame({
-                "period": [pd.Timestamp(f"{yr}-01-01") for yr in nga_years],
-                "value": nga_values_raw,
-                "series_code": ["A-NE.CON.PRVT.CD-NGA"] * len(nga_years),
-                "type": ["hfce"] * len(nga_years),
-                "year": [int(yr) for yr in nga_years],
-                "iso": ["NGA"] * len(nga_years),
-            })
+            # add current account balance to replace HFCE
             
-            # Concatenating all 3 countries into a single DataFrame
-            hfce_df = pd.concat([hfce_df, nga_imputed_df], ignore_index=True)
-            hfce_df["value"] = pd.to_numeric(hfce_df["value"], errors="coerce")
             
             gdp_df = fetch_series(
                 provider_code='WB',
@@ -286,7 +246,8 @@ class Fetcher():
                     'country': ['GHA', 'NGA', 'CHN'],
                     'indicator': ['NY.GDP.MKTP.CD']
                 }
-            )
+            ) # WD Idataset
+            
             if gdp_df is None or gdp_df.empty:
                 raise ValueError("Required GDP API request returned no observations.")
             missing_columns = {"period", "value", "series_code"}.difference(
@@ -309,6 +270,36 @@ class Fetcher():
             gdp_df["iso"] = gdp_df["iso"].fillna(code_iso)
             if gdp_df[["year", "iso"]].isna().any().any():
                 raise ValueError("GDP series has missing country or year keys.")
+            gdp_df["iso"] = gdp_df["iso"].astype("string").str.strip().str.upper()
+            # Keep DBnomics for NGA through 2018; use the current WB source afterward.
+            gdp_df = gdp_df.lo([
+                ~(
+                    gdp_df["iso"].eq("NGA")
+                    & gdp_df["year"].between(2019, 2024)
+                )
+            ])
+            gdp_df = pd.concat(
+                [gdp_df], ignore_index=True
+            )
+            gdp_df["iso"] = gdp_df["iso"].astype("string").str.strip().str.upper()
+            gdp_df["year"] = pd.to_numeric(gdp_df["year"], errors="coerce")
+            nga_recent_gdp = gdp_df.loc[
+                gdp_df["iso"].eq("NGA") & gdp_df["year"].between(2019, 2024)
+            ]
+            expected_nga_years = set(range(2019, 2025))
+            invalid_nga_years = (
+                nga_recent_gdp["year"].isna()
+                | nga_recent_gdp["year"].mod(1).ne(0)
+            )
+            if (
+                invalid_nga_years.any()
+                or nga_recent_gdp["year"].duplicated().any()
+                or set(nga_recent_gdp["year"].astype(int)) != expected_nga_years
+            ):
+                raise ValueError(
+                    "NGA GDP must contain exactly one observation for each "
+                    "integer year from 2019 through 2024."
+                )
                         
             # Define Imputation Logic
             def _fill_group(group):
@@ -343,8 +334,8 @@ class Fetcher():
             )
 
             if wb_df.empty and imf_df.empty and hfce_df.empty:
-                raise Exception("DB Nomics returned an empty dataset for all providers.")
-            fetched_df = pd.concat([wb_df, imf_df, hfce_df, gdp_df], ignore_index=True) # sticks into master table
+                raise Exception("WB-DBN returned an empty dataset for all providers.")
+            fetched_df = pd.concat([wb_df, imf_df, gdp_df], ignore_index=True) # sticks into master table
 
             df_cleaned = pd.DataFrame({
                 "period": fetched_df["period"],
@@ -399,7 +390,10 @@ class Fetcher():
                 "CHINA": "CHN",
             }
             if "iso" in fetched_df.columns:
-                df_cleaned["iso"] = fetched_df["iso"].astype("string").str.upper().str.strip()
+                raw_iso = (
+                    fetched_df["iso"].astype("string").str.upper().str.strip()
+                )
+                df_cleaned["iso"] = raw_iso.map(country_aliases)
             else:
                 df_cleaned["iso"] = np.nan
             for country_column in (
@@ -415,14 +409,33 @@ class Fetcher():
                     ).str.upper().str.strip().map(country_aliases)
                     df_cleaned["iso"] = df_cleaned["iso"].fillna(dimension_iso)
             code_iso = df_cleaned["series_code"].astype(str).str.extract(
-                r"(?:^|[-.])(GHA|NGA|CHN|GH|NG|CN)$", expand=False
+                r"(?:^|[-._])(GHA|NGA|CHN|GH|NG|CN)$", expand=False
             )
             code_iso = code_iso.replace(
                 {"GH": "GHA", "NG": "NGA", "CN": "CHN"}
             )
             df_cleaned["iso"] = df_cleaned["iso"].fillna(code_iso)
             if df_cleaned["iso"].isna().any():
-                raise ValueError("Fetched macro data contains rows without a valid country code.")
+                unresolved = fetched_df.loc[
+                    df_cleaned["iso"].isna(),
+                    [
+                        column
+                        for column in (
+                            "type",
+                            "series_code",
+                            "iso",
+                            "REF_AREA",
+                            "ref_area",
+                            "country_code",
+                            "country",
+                        )
+                        if column in fetched_df.columns
+                    ],
+                ].drop_duplicates()
+                raise ValueError(
+                    "Fetched macro data contains rows without a valid country "
+                    f"code: {unresolved.to_dict(orient='records')}"
+                )
             gdp_rows = df_cleaned["type"].eq("gdp")
             if not gdp_rows.any() or not df_cleaned.loc[gdp_rows, "value"].notna().any():
                 raise ValueError("Required GDP series is absent from fetched macro data.")
@@ -465,6 +478,34 @@ class Fetcher():
                         ):
                             raise ValueError(
                                 "Cached macro data does not contain usable GDP observations."
+                            )
+                        if "series_code" not in cached_gdp.columns:
+                            raise ValueError(
+                                "Cached GDP data cannot verify the World Bank API "
+                                "NGA values for 2019–2024."
+                            )
+                        cached_gdp["iso"] = cached_gdp["iso"].astype(str).str.upper()
+                        cached_gdp["year"] = pd.to_numeric(
+                            cached_gdp["year"], errors="coerce"
+                        )
+                        recent_nga_gdp = cached_gdp.loc[
+                            cached_gdp["iso"].eq("NGA")
+                            & cached_gdp["year"].between(2019, 2024)
+                        ]
+                        if (
+                            set(recent_nga_gdp["year"].dropna().astype(int))
+                            != set(range(2019, 2025))
+                            or recent_nga_gdp["year"].duplicated().any()
+                            or recent_nga_gdp["series_code"]
+                            .astype(str)
+                            .str.upper()
+                            .ne("WB.API.NY.GDP.MKTP.CD.NGA")
+                            .any()
+                            or recent_nga_gdp["value"].isna().any()
+                        ):
+                            raise ValueError(
+                                "Cached GDP data does not contain verified World Bank "
+                                "API NGA observations for every year from 2019 through 2024."
                             )
                         print("Warning: API fetch failed. Using existing database data.")
                         self.is_from_fallback = True
