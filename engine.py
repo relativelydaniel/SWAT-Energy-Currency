@@ -56,7 +56,12 @@ class DataEngine:
             ).reset_index()
 
             # GUARD: Guarantee required macro columns exist in db_pivot
-            for required_col in ['exchange_rate', 'inflation', 'gdp']:
+            for required_col in [
+                'exchange_rate',
+                'inflation',
+                'current_account_balance',
+                'gdp',
+            ]:
                 if required_col not in db_pivot.columns:
                     db_pivot[required_col] = np.nan
             if db_pivot["gdp"].isna().all():
@@ -128,7 +133,7 @@ class DataEngine:
             return None
        
         energy_cols = [c for c in df.columns if any(x in c for x in ['primaryvalue', 'qty', 'fobvalue', 'netwgt', 'cifvalue'])]
-        macro_cols = ['inflation', 'exchange_rate', 'hfce']
+        macro_cols = ['inflation', 'exchange_rate', 'current_account_balance']
         target_cols = [col for col in macro_cols if col in df.columns]
         
         if energy_cols:
@@ -151,67 +156,87 @@ class DataEngine:
         return None
        
     def speartests(self):
-        
         if self.df is None or self.df.empty:
             return {}
-        
-        if 'altqty' in self.df.columns and 'qty' in self.df.columns:
-            self.df['altqty'] = self.df['altqty'].replace(0, np.nan)
-            self.df['qty_ratio'] = self.df['qty'] / self.df['altqty'] # unit based calculation for elasticicity
-        
-        grouped = self.df.groupby('iso')
-        self.df['altqty'] = self.df['altqty'].replace(0, float('nan'))
-        self.df['unit_value'] = (self.df['primaryvalue'] / self.df['netwgt'].replace(0, np.nan))    
-        results = {} 
+
+        data = self.df.copy()
+        if {"altqty", "qty"}.issubset(data.columns):
+            altqty = pd.to_numeric(data["altqty"], errors="coerce").replace(0, np.nan)
+            qty = pd.to_numeric(data["qty"], errors="coerce")
+            data["qty_ratio"] = qty / altqty
+        if {"primaryvalue", "netwgt"}.issubset(data.columns):
+            primaryvalue = pd.to_numeric(data["primaryvalue"], errors="coerce")
+            netwgt = pd.to_numeric(data["netwgt"], errors="coerce").replace(
+                0, np.nan
+            )
+            data["unit_value"] = primaryvalue / netwgt
+
+        grouped = data.groupby('iso')
+        results = {}
         print("\n--- SPEARMAN CORRELATION & VARIATION TESTS---")
 
-        # highlight the ISO / country code per iteration and derive quantity \
-            
-        for iso, subset in grouped:   
+        for iso, subset in grouped:
             print(f"\n--- COUNTRY: {iso} ---")
-                                                                                                                                                
-            val = subset['primaryvalue'].corr(subset['exchange_rate'], method='spearman')
-            print(f"Spearman - Primary Value vs Exchange Rate ({iso}): {val:.4f}")
-            results[f'Spearman - Primary Value vs Exchange Rate ({iso}): '] = round(val, 4)
-        
-            # unit value 
-            net_wgt = subset['netwgt'] 
-            pv = subset['primaryvalue'] # derived value
-            if pv.dropna().empty or net_wgt.sum() == 0:
+
+            if {"primaryvalue", "exchange_rate"}.issubset(subset.columns):
+                val = pd.to_numeric(
+                    subset['primaryvalue'], errors="coerce"
+                ).corr(
+                    pd.to_numeric(subset['exchange_rate'], errors="coerce"),
+                    method='spearman',
+                )
+                results[f'Spearman - Primary Value vs Exchange Rate ({iso}): '] = (
+                    round(val, 4) if pd.notna(val) else None
+                )
+                print(f"Spearman - Primary Value vs Exchange Rate ({iso}): {val}")
+
+            if "unit_value" not in subset.columns:
                 results[f'Unit Value Primary Val : Net Weight ({iso}): '] = None
                 print(f"Warning: Data for {iso} is insufficient for UV calculation.")
             else:
                 unit_val = subset['unit_value'].replace(0, np.nan)
-                print(f"Unit Value Primary Val : Net Weight ({iso}): {unit_val.mean():.4f}")
-                results[f'Unit Value Primary Val : Net Weight ({iso}): '] = round(unit_val.mean(), 4)
+                mean_unit_value = unit_val.mean()
+                print(
+                    f"Unit Value Primary Val : Net Weight ({iso}): "
+                    f"{mean_unit_value}"
+                )
+                results[f'Unit Value Primary Val : Net Weight ({iso}): '] = (
+                    round(mean_unit_value, 4)
+                    if pd.notna(mean_unit_value)
+                    else None
+                )
 
-            
-            # elasticity calculation | hybrid log log regression + division method
-            inflation = subset['inflation'].replace(0, np.nan)
-            qty_ratio = subset['qty_ratio'].replace(0, np.nan)
-            
-            valid_data = pd.concat([qty_ratio, inflation], axis=1).dropna()
-            if inflation.empty or valid_data.empty or inflation.sum() == 0:
+            if not {"inflation", "qty_ratio"}.issubset(subset.columns):
                 results[f'Elasticity - Quantity vs Inflation ({iso}): '] = None
                 print(f"Warning: Data for {iso} is insufficient for elasticity calculation.")
-            
-            if len(valid_data) >= 3:
-                log_inf = np.log(valid_data['inflation'])
-                log_qty = np.log(valid_data['qty_ratio'])
-                X = sm.add_constant(log_inf)
-                model = sm.OLS(log_qty, X).fit()
-                
-                elast = model.params['inflation']
-                residuals = model.resid # residuals are like the standard deviation relative to the elasticity relationship
-                print(f"Elasticity - Quantity vs Inflation ({iso}): {elast:.4f}")
-                print(f"Residuals: {residuals.describe()}")
-                results[f'Elasticity - Quantity vs Inflation ({iso}): '] = round(elast, 4)
-                results[f'Residuals - Quantity vs Inflation ({iso}): '] = residuals.tolist()
-            
-            # Covariance
-            pass
-            
-            
+                continue
+
+            valid_data = subset[["inflation", "qty_ratio"]].apply(
+                pd.to_numeric, errors="coerce"
+            )
+            valid_data = valid_data.loc[
+                (valid_data["inflation"] > 0) & (valid_data["qty_ratio"] > 0)
+            ].dropna()
+            if len(valid_data) < 3:
+                results[f'Elasticity - Quantity vs Inflation ({iso}): '] = None
+                print(f"Warning: Data for {iso} is insufficient for elasticity calculation.")
+                continue
+
+            log_inf = np.log(valid_data['inflation'])
+            log_qty = np.log(valid_data['qty_ratio'])
+            X = sm.add_constant(log_inf)
+            model = sm.OLS(log_qty, X).fit()
+
+            elast = model.params.iloc[-1]
+            residuals = model.resid
+            print(f"Elasticity - Quantity vs Inflation ({iso}): {elast:.4f}")
+            print(f"Residuals: {residuals.describe()}")
+            results[f'Elasticity - Quantity vs Inflation ({iso}): '] = round(
+                elast, 4
+            )
+            results[f'Residuals - Quantity vs Inflation ({iso}): '] = (
+                residuals.tolist()
+            )
         return results
     # END OF FIRST HALF 
 
@@ -228,7 +253,7 @@ class TradeExpScore:
         target_col = None
                     
     
-    def run_pca(self, n_components=2, target_col='hfce'):
+    def run_pca(self, n_components=2, target_col='current_account_balance'):
         if self.df is None or self.df.empty:
             return None
         
@@ -250,7 +275,7 @@ class TradeExpScore:
             print("Warning: No valid rows available for PCA.")
             return None
         
-        # Principal Component Analysis based on briding EES gap
+        # PCA is exploratory; TES is calculated separately from trade and GDP.
         X = valid_df[active_features]
         
         X = valid_df[active_features].copy()

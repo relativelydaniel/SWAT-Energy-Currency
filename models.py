@@ -20,7 +20,7 @@ class ECModels:
         self.pca_results = pca_results
 
         
-    def run_linear_regression(self, target="hfce"):
+    def run_linear_regression(self, target="current_account_balance"):
         scores = pd.DataFrame(
             {"PC1": np.asarray(self.pca_results["pca_scores"])[:, 0]},
             index=self.df.index,

@@ -6,29 +6,9 @@ import os
 import requests
 from unittest.mock import MagicMock
 from unittest.mock import Mock
-from datacleanse import DataCleaner, Fetcher, _fetch_nigeria_gdp_from_world_bank
+from datacleanse import DataCleaner, Fetcher
 from engine import DataEngine, TradeExpScore
 from main import model_analysis
-
-
-def mock_world_bank_nigeria_gdp(monkeypatch, values=None):
-    values = values or {
-        year: year * 1_000_000_000 for year in range(2019, 2025)
-    }
-    observations = [
-        {
-            "date": str(year),
-            "value": value,
-            "countryiso3code": "NGA",
-            "indicator": {"id": "NY.GDP.MKTP.CD"},
-        }
-        for year, value in values.items()
-    ]
-    response = Mock()
-    response.json.return_value = [{}, observations]
-    request = Mock(return_value=response)
-    monkeypatch.setattr("datacleanse.requests.get", request)
-    return request
 
 
 @pytest.fixture
@@ -391,180 +371,70 @@ def test_model_analysis_accepts_refyear_only_trade_frame():
 
 
 def test_fetch_all_includes_normalized_gdp_rows(mock_env_variables, monkeypatch):
-    series = [
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [5.0],
-                "series_code": ["WB.WDI.FP.CPI.TOTL.ZG_GHA"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [10.0],
-                "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE"],
-                "REF_AREA": ["GH"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [100.0],
-                "series_code": ["WB.WDI.NE.CON.PRVT.CD.GHA"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [2000.0],
-                "series_code": ["WB.WDI.NY.GDP.MKTP.CD_GHA"],
-            }
-        ),
+    indicators = [
+        "FP.CPI.TOTL.ZG",
+        "NY.GDP.MKTP.CD",
+        "BN.CAB.XOKA.CD",
     ]
-    fetch_mock = Mock(side_effect=series)
+    years = [f"YR{year}" for year in range(2014, 2025)]
+
+    def world_bank_frame(series, economy, time, columns):
+        assert series == indicators
+        assert time == range(2014, 2025)
+        assert columns == "series"
+        values = {
+            "FP.CPI.TOTL.ZG": [5.0] * len(years),
+            "NY.GDP.MKTP.CD": [2_000.0] * len(years),
+            "BN.CAB.XOKA.CD": [100.0] * len(years),
+        }
+        return pd.DataFrame(
+            values,
+            index=pd.MultiIndex.from_product(
+                [[economy], years], names=["economy", "time"]
+            ),
+        )
+
+    wb_request = Mock(side_effect=world_bank_frame)
+    monkeypatch.setattr("datacleanse.wb.data.DataFrame", wb_request)
+    imf_data = pd.DataFrame(
+        {
+            "period": ["2022", "2022"],
+            "value": [10.0, 20.0],
+            "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE"] * 2,
+            "REF_AREA": ["GH", "NG"],
+        }
+    )
+    fetch_mock = Mock(return_value=imf_data)
     monkeypatch.setattr("datacleanse.fetch_series", fetch_mock)
-    mock_world_bank_nigeria_gdp(monkeypatch)
     fetcher = Fetcher(db_path=mock_env_variables["db_path"])
 
     result = fetcher.fetch_all()
 
     gdp = result.query("type == 'gdp' and iso == 'GHA'").iloc[0]
-    assert gdp["year"] == 2022
+    assert gdp["year"] == 2014
     assert gdp["value"] == 2000.0
     exchange_rate = result.query("type == 'exchange_rate' and iso == 'GHA'").iloc[0]
     assert exchange_rate["value"] == 10.0
-    assert fetch_mock.call_count == 4
-
-
-def test_fetch_all_preserves_imputed_nigeria_hfce_keys(mock_env_variables, monkeypatch):
-    series = [
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [10.0],
-                "series_code": ["WB.WDI.FP.CPI.TOTL.ZG.NGA"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [150.0],
-                "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE.NG"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [50.0],
-                "series_code": ["WB.WDI.NE.CON.PRVT.CD.GHA"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [500e9],
-                "series_code": ["WB.WDI.NY.GDP.MKTP.CD.NGA"],
-            }
-        ),
+    assert result.query(
+        "type == 'current_account_balance' and iso == 'NGA'"
+    ).iloc[0]["value"] == 100.0
+    assert wb_request.call_count == 2
+    assert [call.kwargs["economy"] for call in wb_request.call_args_list] == [
+        "GHA",
+        "NGA",
     ]
-    monkeypatch.setattr("datacleanse.fetch_series", Mock(side_effect=series))
-    mock_world_bank_nigeria_gdp(monkeypatch)
-    result = Fetcher(db_path=mock_env_variables["db_path"]).fetch_all()
-
-    nigeria_hfce = result.query(
-        "iso == 'NGA' and year == 2014 and type == 'hfce'"
-    ).iloc[0]
-    assert nigeria_hfce["value"] == 412e9
+    fetch_mock.assert_called_once()
 
 
-def test_fetch_all_uses_official_nigeria_gdp_from_2019_onward(
+def test_fetch_all_rejects_empty_world_bank_data_without_cache(
     mock_env_variables, monkeypatch
 ):
-    years = list(range(2014, 2025))
-    dbnomics_gdp = pd.DataFrame(
-        {
-            "period": [str(year) for year in years],
-            "value": [100.0 + year for year in years],
-            "series_code": ["WB.WDI.NY.GDP.MKTP.CD.NGA"] * len(years),
-            "iso": [" nga "] * len(years),
-        }
-    )
-    series = [
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [10.0],
-                "series_code": ["WB.WDI.FP.CPI.TOTL.ZG.NGA"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [150.0],
-                "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE.NG"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2014"],
-                "value": [50.0],
-                "series_code": ["WB.WDI.NE.CON.PRVT.CD.GHA"],
-            }
-        ),
-        dbnomics_gdp,
-    ]
-    official_values = {
-        year: 200_000_000_000.0 + year for year in range(2019, 2025)
-    }
-    monkeypatch.setattr("datacleanse.fetch_series", Mock(side_effect=series))
-    world_bank_request = mock_world_bank_nigeria_gdp(monkeypatch, official_values)
+    wb_request = Mock(side_effect=Exception("unexpected failure"))
+    monkeypatch.setattr("datacleanse.wb.data.DataFrame", wb_request)
+    fetcher = Fetcher(db_path=mock_env_variables["db_path"])
 
-    result = Fetcher(db_path=mock_env_variables["db_path"]).fetch_all()
-    nigeria_gdp = result.query("type == 'gdp' and iso == 'NGA'").set_index("year")
-
-    world_bank_request.assert_called_once_with(
-        "https://api.worldbank.org/v2/country/NGA/indicator/NY.GDP.MKTP.CD",
-        params={"date": "2019:2024", "format": "json", "per_page": 1000},
-        timeout=30,
-    )
-    assert nigeria_gdp.loc[2014, "value"] == 100.0 + 2014
-    assert nigeria_gdp.index.is_unique
-    for year, expected_value in official_values.items():
-        assert nigeria_gdp.loc[year, "value"] == expected_value
-        assert nigeria_gdp.loc[year, "series_code"] == (
-            "WB.API.NY.GDP.MKTP.CD.NGA"
-        )
-
-
-def test_world_bank_gdp_rejects_fractional_year_before_coverage_check(
-    monkeypatch,
-):
-    observations = [
-        {
-            "date": str(year),
-            "value": year * 1_000_000_000,
-            "countryiso3code": "NGA",
-            "indicator": {"id": "NY.GDP.MKTP.CD"},
-        }
-        for year in range(2019, 2025)
-    ]
-    observations.append(
-        {
-            "date": "2020.5",
-            "value": 250_000_000_000,
-            "countryiso3code": "NGA",
-            "indicator": {"id": "NY.GDP.MKTP.CD"},
-        }
-    )
-    response = Mock()
-    response.json.return_value = [{}, observations]
-    monkeypatch.setattr(
-        "datacleanse.requests.get", Mock(return_value=response)
-    )
-
-    with pytest.raises(ValueError, match="invalid year values"):
-        _fetch_nigeria_gdp_from_world_bank()
+    with pytest.raises(RuntimeError, match="database fallback failed"):
+        fetcher.fetch_all()
 
 
 def test_gdp_observation_survives_engine_pivot_and_trade_join():
@@ -607,7 +477,7 @@ def test_gdp_observation_survives_engine_pivot_and_trade_join():
     assert matching.iloc[0]["inflation"] == 5.0
 
 
-def test_imputed_hfce_reaches_matching_trade_rows():
+def test_current_account_balance_reaches_matching_trade_rows():
     class MockCleaner:
         def fetch_api(self, countries):
             return pd.DataFrame(
@@ -630,8 +500,8 @@ def test_imputed_hfce_reaches_matching_trade_rows():
                 {
                     "iso": ["NGA", "NGA"],
                     "year": [2014, 2014],
-                    "type": ["hfce", "gdp"],
-                    "value": [412e9, 500e9],
+                    "type": ["current_account_balance", "gdp"],
+                    "value": [-10e9, 500e9],
                 }
             )
 
@@ -642,44 +512,39 @@ def test_imputed_hfce_reaches_matching_trade_rows():
     engine.sync_matrix({566: "NGA"})
 
     matching = engine.df.query("iso == 'NGA' and year == 2014")
-    assert matching.iloc[0]["hfce"] == 412e9
+    assert matching.iloc[0]["current_account_balance"] == -10e9
     assert matching.iloc[0]["gdp"] == 500e9
+
+
+def test_speartests_handles_missing_optional_trade_measures():
+    df = pd.DataFrame(
+        {
+            "iso": ["GHA", "GHA"],
+            "primaryvalue": [10.0, 20.0],
+            "exchange_rate": [1.0, 2.0],
+            "inflation": [5.0, 6.0],
+        }
+    )
+
+    results = DataEngine(cleaner=None, fetcher=None)
+    results.df = df
+
+    calculated = results.speartests()
+
+    assert calculated["Unit Value Primary Val : Net Weight (GHA): "] is None
+    assert calculated["Elasticity - Quantity vs Inflation (GHA): "] is None
 
 
 def test_gdp_fetch_failure_does_not_silently_continue_without_gdp(
     mock_env_variables, monkeypatch
 ):
-    series = [
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [5.0],
-                "series_code": ["WB.WDI.FP.CPI.TOTL.ZG.GHA"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [10.0],
-                "series_code": ["IMF.IFS.ENDE_XDC_USD_RATE.GH"],
-            }
-        ),
-        pd.DataFrame(
-            {
-                "period": ["2022"],
-                "value": [100.0],
-                "series_code": ["WB.WDI.NE.CON.PRVT.CD.GHA"],
-            }
-        ),
-        RuntimeError("GDP source unavailable"),
-    ]
-    fetch_mock = Mock(side_effect=series)
+    wb_request = Mock(side_effect=RuntimeError("GDP source unavailable"))
     read_fallback = Mock(side_effect=ValueError("no valid cached dataset"))
-    monkeypatch.setattr("datacleanse.fetch_series", fetch_mock)
+    monkeypatch.setattr("datacleanse.wb.data.DataFrame", wb_request)
     monkeypatch.setattr("datacleanse.pd.read_sql_table", read_fallback)
     fetcher = Fetcher(db_path=mock_env_variables["db_path"])
 
-    with pytest.raises(Exception, match="GDP source unavailable"):
+    with pytest.raises(RuntimeError, match="GDP source unavailable"):
         fetcher.fetch_all()
     assert not fetcher.is_from_fallback
     read_fallback.assert_called_once()
