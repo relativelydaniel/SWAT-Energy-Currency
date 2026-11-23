@@ -49,9 +49,9 @@ class DataEngine:
             # In engine.py inside sync_matrix():
 
             db_pivot = dbnomics_df.pivot_table(
-                index=['year', 'iso'], 
-                columns='type', 
-                values='value', 
+                index=['year', 'iso'],
+                columns='type',
+                values='value',
                 aggfunc='first'
             ).reset_index()
 
@@ -62,39 +62,21 @@ class DataEngine:
             if db_pivot["gdp"].isna().all():
                 raise ValueError("Required GDP series has no usable values after pivot.")
 
-            # Forward/backward fill exchange_rate and inflation per ISO
-            predictor_cols = ['exchange_rate', 'inflation']
-            for col in predictor_cols:
-                db_pivot[col] = db_pivot.groupby('iso')[col].transform(lambda g: g.ffill().bfill())
+            if 'iso' not in uncom_df.columns:
+                raise ValueError("UN Comtrade data is missing the required 'iso' column.")
 
-            # Masks for Nigeria HFCE OLS Imputation
-            nga_mask = db_pivot['iso'] == 'NGA'
-            train_mask = nga_mask & db_pivot['hfce'].notna() # 2014-2021
-            pred_mask = nga_mask & db_pivot['hfce'].isna()   # 2022-2024
-            
-            features = ['exchange_rate', 'inflation']
+            uncom_df['iso'] = uncom_df['iso'].astype(str).str.upper().str.strip()
+            db_pivot['iso'] = db_pivot['iso'].astype(str).str.upper().str.strip()
 
-            # Training and Imputing
-            if train_mask.sum() > 0 and pred_mask.sum() > 0:
-                X_train = db_pivot.loc[train_mask, features]
-                y_train = db_pivot.loc[train_mask, 'hfce']
-                X_pred = db_pivot.loc[pred_mask, features]
+            merged_df = uncom_df.merge(
+                db_pivot,
+                on=['year', 'iso'],
+                how='left',
+                validate='many_to_one'
+            )
 
-                # Fit OLS Regression
-                model = LinearRegression()
-                model.fit(X_train, y_train)
-
-                # Impute predicted HFCE values directly back into db_pivot for 2022-2024
-                db_pivot.loc[pred_mask, 'hfce'] = model.predict(X_pred)
-                
-                print("Successfully imputed missing 2022-2024 HFCE data using OLS.")
-                
-            merged_df = pd.merge(uncom_df, db_pivot, on=['year', 'iso'], how='inner')
-            if 'hfce' in merged_df.columns: 
-                merged_df['hfce'] = merged_df['hfce'].fillna(merged_df['hfce'].mean())
-            
             if merged_df.empty:
-                raise RuntimeError("Data integrity failure: Inner join yielded 0 rows.")
+                raise ValueError("No trade and macroeconomic rows matched after synchronization.")
 
             self.df = merged_df
             print(f"-> Matrix synchronized successfully! Matrix shape: {self.df.shape}")

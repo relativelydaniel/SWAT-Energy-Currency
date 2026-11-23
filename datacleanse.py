@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from dbnomics import fetch_series
-from wbgapi import fetch_series as wb 
+from wbgapi import wb 
 import requests
 import json
 import time
@@ -221,13 +221,13 @@ class Fetcher():
 
         
     def fetch_all(self): 
-        print(f"Executing batch ingestion from DB Nomics...")
+        print(f"Executing batch ingestion from WB + DB Nomics...")
+        # set period 2014-24
         try:
-            wb_df = fetch_series(provider_code='WB', dataset_code='WDI',
-                dimensions={'frequency': ['A'], # annual
-                            'country': ['GHA', 'NGA', 'CHN'], # country isos
-                            'indicator': ['FP.CPI.TOTL.ZG']} # inflation per consumer price index
-            ) # fetch from World Bank WDI dataset for inflation
+            for country in str(COMTRADE_PARTNER_CODE).split(','):
+                wb_df = wb.series.info(['FP.CPI.TOTL.ZG']) # fetch from World Bank WDI dataset for inflation per consumer price 
+                gdp_df = wb.series.info(['NY.GDP.MKTP.CD']) # WDI dataset - current GDP
+                curr_bal_df = wb.series.info(['BN.CAB.XOKA.CD']) # WDI dataset - current account balance to replace HFCE
             
             imf_df = fetch_series(provider_code='IMF', dataset_code='IFS',
                 dimensions={'FREQ': ['A'], 
@@ -235,18 +235,8 @@ class Fetcher():
                             'INDICATOR': ['ENDE_XDC_USD_RATE']} # exchange rate in USD
             )
             
-            # add current account balance to replace HFCE
             
-            
-            gdp_df = fetch_series(
-                provider_code='WB',
-                dataset_code='WDI',
-                dimensions={
-                    'frequency': ['A'],
-                    'country': ['GHA', 'NGA', 'CHN'],
-                    'indicator': ['NY.GDP.MKTP.CD']
-                }
-            ) # WD Idataset
+    
             
             if gdp_df is None or gdp_df.empty:
                 raise ValueError("Required GDP API request returned no observations.")
@@ -272,12 +262,11 @@ class Fetcher():
                 raise ValueError("GDP series has missing country or year keys.")
             gdp_df["iso"] = gdp_df["iso"].astype("string").str.strip().str.upper()
             # Keep DBnomics for NGA through 2018; use the current WB source afterward.
-            gdp_df = gdp_df.lo([
-                ~(
+            gdp_df = gdp_df.loc([(
                     gdp_df["iso"].eq("NGA")
                     & gdp_df["year"].between(2019, 2024)
-                )
-            ])
+                )])
+            
             gdp_df = pd.concat(
                 [gdp_df], ignore_index=True
             )
@@ -335,7 +324,7 @@ class Fetcher():
 
             if wb_df.empty and imf_df.empty and hfce_df.empty:
                 raise Exception("WB-DBN returned an empty dataset for all providers.")
-            fetched_df = pd.concat([wb_df, imf_df, gdp_df], ignore_index=True) # sticks into master table
+            fetched_df = pd.concat([wb_df, imf_df, curr_bal_df,  gdp_df], ignore_index=True) # sticks into master table
 
             df_cleaned = pd.DataFrame({
                 "period": fetched_df["period"],
@@ -351,8 +340,9 @@ class Fetcher():
                     return 'exchange_rate'
                 elif 'GDP' in code_upper:
                     return 'gdp'
-                elif 'CON' in code_upper or 'HFCE' in code_upper or 'CONSUMPTION' in code_upper:
-                    return 'hfce'
+               # current account balance is used to replace HFCE
+                elif 'BN.CAB.XOKA.CD' in code_upper or 'CURRENT_ACCOUNT_BALANCE' in code_upper:
+                    return 'current_account_balance'
                 else:
                     return 'unknown'
                 
@@ -459,58 +449,11 @@ class Fetcher():
                         self.name, 
                         con=conn, 
                         schema='Trade Intelligence')
-                    if not self.df.empty:
-                        self.standardise_columns()
-                        required_columns = {"iso", "year", "type", "value"}
-                        if not required_columns.issubset(self.df.columns):
-                            raise ValueError(
-                                "Cached macro data lacks the country-year GDP fields."
-                            )
-                        cached_gdp = self.df.loc[self.df["type"].eq("gdp")].copy()
-                        cached_gdp["value"] = pd.to_numeric(
-                            cached_gdp["value"], errors="coerce"
-                        )
-                        if (
-                            cached_gdp.empty
-                            or cached_gdp[["iso", "year"]].isna().any().any()
-                            or cached_gdp["value"].isna().all()
-                            or (cached_gdp["value"].dropna() <= 0).any()
-                        ):
-                            raise ValueError(
-                                "Cached macro data does not contain usable GDP observations."
-                            )
-                        if "series_code" not in cached_gdp.columns:
-                            raise ValueError(
-                                "Cached GDP data cannot verify the World Bank API "
-                                "NGA values for 2019–2024."
-                            )
-                        cached_gdp["iso"] = cached_gdp["iso"].astype(str).str.upper()
-                        cached_gdp["year"] = pd.to_numeric(
-                            cached_gdp["year"], errors="coerce"
-                        )
-                        recent_nga_gdp = cached_gdp.loc[
-                            cached_gdp["iso"].eq("NGA")
-                            & cached_gdp["year"].between(2019, 2024)
-                        ]
-                        if (
-                            set(recent_nga_gdp["year"].dropna().astype(int))
-                            != set(range(2019, 2025))
-                            or recent_nga_gdp["year"].duplicated().any()
-                            or recent_nga_gdp["series_code"]
-                            .astype(str)
-                            .str.upper()
-                            .ne("WB.API.NY.GDP.MKTP.CD.NGA")
-                            .any()
-                            or recent_nga_gdp["value"].isna().any()
-                        ):
-                            raise ValueError(
-                                "Cached GDP data does not contain verified World Bank "
-                                "API NGA observations for every year from 2019 through 2024."
-                            )
+                if not self.df.empty:
                         print("Warning: API fetch failed. Using existing database data.")
                         self.is_from_fallback = True
                         return self.df
-                    else:
+                else:
                         raise Exception("No existing data available in the database.")
             except Exception as db_e:
                 print(f"Database fetch failed: {db_e}")
