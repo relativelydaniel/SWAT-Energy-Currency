@@ -3,8 +3,8 @@ import sys
 from pathlib import Path
 from datacleanse import DataCleaner, Fetcher
 from dotenv import load_dotenv
-from engine import DataEngine
-from models import ECModels
+from engine import DataEngine, TradeExpScore
+from config import COUNTRY_ISO_MAP
 
 base_path = Path(__file__).resolve().parent
 env_path = base_path / ".env"
@@ -16,7 +16,7 @@ def trilateral_analysis():
     api_url = os.environ.get("UNCOM_URL")
     api_key = os.environ.get("UNCOM_KEY")
     db_path = os.environ.get("DB_PATH")
-    countries = [288, 566, 156]
+    countries = COUNTRY_ISO_MAP
 
     print(f"DEBUG: URL found: {api_url is not None}")
     print(f"DEBUG: KEY found: {api_key is not None}")
@@ -40,24 +40,22 @@ def trilateral_analysis():
         return False
 
 def model_analysis(df, engine):
-    models = ECModels(df)
-    
-    gap_results = engine.energy_equity_gap()
+    print("\nCommencing Trade Exposure Score analysis...")
+    if "gdp" not in df.columns:
+        raise ValueError("Required GDP data is missing from the analysis table.")
 
-    if gap_results is not None:
-        # Process symbolic regression / equity gap results
-        print("Energy Equity Gap Results:", gap_results)
-    else:
-        print("Notice: Proceeding with remaining linear regression models without Equity Gap analysis.")
-        
-    # Execute the linear regression model to generate the 'frame' data
-    frame = models.run_linear_regression()
-    return engine, frame
+    analysis_df = df.copy()
+    if "year" not in analysis_df.columns and "refyear" in analysis_df.columns:
+        analysis_df = analysis_df.rename(columns={"refyear": "year"})
+    if "year" not in analysis_df.columns:
+        raise ValueError("Analysis data must contain either 'year' or 'refyear'.")
+    gdp_df = analysis_df[["iso", "year", "gdp"]].drop_duplicates()
+    tes_results = TradeExpScore(analysis_df).calculate_tes(gdp_df)
+    return engine, tes_results
 
 def run_swat():
     
     print("\nHello, and welcome to SWAT: a computational demonstration of the trilateral relationship of China, Nigeria, and Ghana.")
-    
     result = trilateral_analysis()
     if not result:
         print("\nSWAT Fatal: Application dashboard execution halted due to engine synchronization failures.")
@@ -67,14 +65,17 @@ def run_swat():
     engine, cleaner, fetcher = result
 
     df = engine.df
-    engine, frame = model_analysis(df, engine)
-
-    if not frame: 
-        print("\nSWAT Fatal: Application dashboard execution halted due to model analysis failures.")
+    try:
+        engine, tes_results = model_analysis(df, engine)
+    except ValueError as e:
+        print(
+            "\nSWAT Fatal: Application dashboard execution halted due to "
+            f"model analysis failures: {e}"
+        )
         return
-    else:
-        print("\nSWAT Success: Model analysis completed.")
-        print(f"Target: {frame['target']} | Predictor: {frame['predictor']} | R-Squared: {frame['r_squared']}")
+
+    print("\nSWAT Success: Trade Exposure Score analysis completed.")
+    print(tes_results.to_string(index=False))
         
 if __name__ == "__main__":
     try:
