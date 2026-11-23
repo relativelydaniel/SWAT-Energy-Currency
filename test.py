@@ -535,6 +535,34 @@ def test_speartests_handles_missing_optional_trade_measures():
     assert calculated["Elasticity - Quantity vs Inflation (GHA): "] is None
 
 
+def test_speartests_rounds_all_numeric_results_to_four_decimals(capsys):
+    df = pd.DataFrame(
+        {
+            "iso": ["GHA"] * 4,
+            "primaryvalue": [1.234567, 2.345678, 3.456789, 5.678912],
+            "exchange_rate": [1.111111, 2.222222, 4.444444, 7.777777],
+            "netwgt": [1.234567, 1.111111, 2.345678, 3.456789],
+            "inflation": [1.234567, 2.345678, 4.567891, 6.789123],
+            "qty": [1.234567, 2.345678, 3.456789, 5.678912],
+            "altqty": [1.111111, 1.234567, 2.222222, 3.333333],
+        }
+    )
+    engine = DataEngine(cleaner=None, fetcher=None)
+    engine.df = df
+
+    results = engine.speartests()
+    output = capsys.readouterr().out
+
+    for key, value in results.items():
+        if isinstance(value, list):
+            assert value == [round(item, 4) for item in value]
+        elif value is not None:
+            assert value == round(value, 4)
+            assert f"{value:.4f}" in output
+
+    assert "Residuals:" in output
+
+
 def test_gdp_fetch_failure_does_not_silently_continue_without_gdp(
     mock_env_variables, monkeypatch
 ):

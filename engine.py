@@ -185,10 +185,17 @@ class DataEngine:
                     pd.to_numeric(subset['exchange_rate'], errors="coerce"),
                     method='spearman',
                 )
-                results[f'Spearman - Primary Value vs Exchange Rate ({iso}): '] = (
-                    round(val, 4) if pd.notna(val) else None
+                rounded_val = round(float(val), 4) if pd.notna(val) else None
+                results[
+                    f'Spearman - Primary Value vs Exchange Rate ({iso}): '
+                ] = rounded_val
+                displayed_val = (
+                    f"{rounded_val:.4f}" if rounded_val is not None else "None"
                 )
-                print(f"Spearman - Primary Value vs Exchange Rate ({iso}): {val}")
+                print(
+                    f"Spearman - Primary Value vs Exchange Rate ({iso}): "
+                    f"{displayed_val}"
+                )
 
             if "unit_value" not in subset.columns:
                 results[f'Unit Value Primary Val : Net Weight ({iso}): '] = None
@@ -196,15 +203,21 @@ class DataEngine:
             else:
                 unit_val = subset['unit_value'].replace(0, np.nan)
                 mean_unit_value = unit_val.mean()
-                print(
-                    f"Unit Value Primary Val : Net Weight ({iso}): "
-                    f"{mean_unit_value}"
-                )
-                results[f'Unit Value Primary Val : Net Weight ({iso}): '] = (
-                    round(mean_unit_value, 4)
+                rounded_mean = (
+                    round(float(mean_unit_value), 4)
                     if pd.notna(mean_unit_value)
                     else None
                 )
+                displayed_mean = (
+                    f"{rounded_mean:.4f}" if rounded_mean is not None else "None"
+                )
+                print(
+                    f"Unit Value Primary Val : Net Weight ({iso}): "
+                    f"{displayed_mean}"
+                )
+                results[
+                    f'Unit Value Primary Val : Net Weight ({iso}): '
+                ] = rounded_mean
 
             if not {"inflation", "qty_ratio"}.issubset(subset.columns):
                 results[f'Elasticity - Quantity vs Inflation ({iso}): '] = None
@@ -229,13 +242,18 @@ class DataEngine:
 
             elast = model.params.iloc[-1]
             residuals = model.resid
-            print(f"Elasticity - Quantity vs Inflation ({iso}): {elast:.4f}")
-            print(f"Residuals: {residuals.describe()}")
-            results[f'Elasticity - Quantity vs Inflation ({iso}): '] = round(
-                elast, 4
+            rounded_elast = round(float(elast), 4)
+            rounded_residuals = residuals.round(4)
+            print(
+                f"Elasticity - Quantity vs Inflation ({iso}): "
+                f"{rounded_elast:.4f}"
             )
+            print(f"Residuals: {residuals.describe().round(4)}")
+            results[
+                f'Elasticity - Quantity vs Inflation ({iso}): '
+            ] = rounded_elast
             results[f'Residuals - Quantity vs Inflation ({iso}): '] = (
-                residuals.tolist()
+                rounded_residuals.tolist()
             )
         return results
     # END OF FIRST HALF 
@@ -443,36 +461,9 @@ class TradeExpScore:
         return result.sort_values(
             ["iso", "energy_type", "year"]
         ).reset_index(drop=True)
-    
-    
-    def parse_sr(self, sr_expression):
-        # Convert the symbolic regression like expression to a string based sympy expression
-        raw_str = str(sr_expression) 
-    
-        # Map gplearn string operators to SymPy mathematical operations
-        local_dict = {
-            'add': lambda a, b: a + b,
-            'sub': lambda a, b: a - b,
-            'mul': lambda a, b: a * b,
-            'div': lambda a, b: a / b,
-            'log': sp.log, # respectively limits till here
-            'sqrt': sp.sqrt,
-            'abs': sp.Abs,
-            'neg': lambda a: -a,
-            'inv': lambda a: 1 / a
-        }
         
-        # Map indexed variables (X0, X1, ...) to actual dataframe column names
-        for i, name in enumerate(self.feature_names):
-            local_dict[f'X{i}'] = sp.Symbol(name)
-            
-        try:
-            sympy_expr = eval(raw_str, {"__builtins__": None}, local_dict)
-            return sympy_expr
-        except Exception as e:
-            print(f"Error parsing symbolic regression expression: {e}")
-            return None
     
     def json_dc(self): 
         return { 
+                
             } # placeholders
