@@ -3,6 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 import os
+import requests
 from unittest.mock import MagicMock
 from unittest.mock import Mock
 from datacleanse import DataCleaner, Fetcher, _fetch_nigeria_gdp_from_world_bank
@@ -123,6 +124,60 @@ def test_comtrade_429_retries_using_retry_after(mock_env_variables, monkeypatch)
     assert request.call_count == 2
     sleep.assert_any_call(0.25)
     assert cleaner.df["primaryvalue"].tolist() == [10.0]
+
+
+def test_comtrade_timeout_retries_then_succeeds(mock_env_variables, monkeypatch):
+    cleaner = DataCleaner(
+        db_path=mock_env_variables["db_path"],
+        api_url=mock_env_variables["api_url"],
+        api_key=mock_env_variables["api_key"],
+    )
+    success = Mock(status_code=200, headers={})
+    success.json.return_value = {
+        "dataset": [{"partnerCode": 156, "primaryValue": 10.0}]
+    }
+    request = Mock(
+        side_effect=[
+            requests.exceptions.ReadTimeout("read timed out"),
+            success,
+        ]
+    )
+    sleep = Mock()
+    monkeypatch.setattr("datacleanse.requests.get", request)
+    monkeypatch.setattr("datacleanse.time.sleep", sleep)
+
+    result = cleaner.fetch_api({288: "GHA"})
+
+    assert request.call_count == 2
+    sleep.assert_any_call(1)
+    assert result["primaryvalue"].tolist() == [10.0]
+    assert not cleaner.is_from_fallback
+
+
+def test_comtrade_timeout_exhaustion_does_not_accept_partial_results(
+    mock_env_variables, monkeypatch
+):
+    cleaner = DataCleaner(
+        db_path=mock_env_variables["db_path"],
+        api_url=mock_env_variables["api_url"],
+        api_key=mock_env_variables["api_key"],
+    )
+    request = Mock(
+        side_effect=requests.exceptions.ReadTimeout("read timed out")
+    )
+    monkeypatch.setattr("datacleanse.requests.get", request)
+    monkeypatch.setattr("datacleanse.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "datacleanse.pd.read_sql_table",
+        Mock(side_effect=ValueError("Table bilateral_trade not found")),
+    )
+
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        cleaner.fetch_api({288: "GHA"})
+
+    assert request.call_count == 3
+    assert cleaner.df.empty
+    assert not cleaner.is_from_fallback
 
 
 def test_partial_comtrade_fetch_uses_cache_instead_of_partial_rows(

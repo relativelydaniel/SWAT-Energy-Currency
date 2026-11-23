@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from dbnomics import fetch_series
-import wbgapi as wb 
+import wbgapi as wb
 import requests
 import json
 import time
@@ -10,6 +10,7 @@ from email.utils import parsedate_to_datetime
 from config import COMTRADE_PARTNER_CODE
 from sqlalchemy import create_engine
 from sklearn.linear_model import LinearRegression 
+
 
 class DataCleaner:
     def __init__(self, db_path=None, api_url=None, api_key=None, countries=None):
@@ -83,7 +84,28 @@ class DataCleaner:
                         fetch_errors.append(f"{country}: HTTP {response.status_code}")
                         break
                 except Exception as e:
-                    fetch_errors.append(f"{country}: {e}")
+                    if isinstance(
+                        e,
+                        (
+                            requests.exceptions.Timeout,
+                            requests.exceptions.ConnectionError,
+                        ),
+                    ):
+                        if attempt < max_attempts - 1:
+                            delay = min(2**attempt, 8)
+                            print(
+                                f"Warning: Comtrade request for {country} "
+                                f"failed ({e}); retrying in {delay}s "
+                                f"({attempt + 2}/{max_attempts})."
+                            )
+                            time.sleep(delay)
+                            continue
+                        fetch_errors.append(
+                            f"{country}: request failed after {max_attempts} "
+                            f"attempts: {e}"
+                        )
+                    else:
+                        fetch_errors.append(f"{country}: {e}")
                     break
             if country_data is not None:
                 country_iso_map = {288: "GHA", 566: "NGA", 156: "CHN"}
@@ -150,7 +172,8 @@ class DataCleaner:
                 raise RuntimeError(
                     f"Critical pipeline error: API fetch failed; cached trade data "
                     f"is unavailable or not confirmed for partner "
-                    f"{COMTRADE_PARTNER_CODE}: {db_error}"
+                    f"{COMTRADE_PARTNER_CODE}. API errors: {fetch_errors}. "
+                    f"Cache error: {db_error}"
                 ) from db_error
     
     def standardise_columns(self):
