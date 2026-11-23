@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from dbnomics import fetch_series
-from wbgapi import wb 
+import wbgapi as wb 
 import requests
 import json
 import time
